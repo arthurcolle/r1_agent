@@ -415,17 +415,33 @@ class ActionGenerator:
                     priority=g.priority
                 ))
 
-        # 6) Fill up to 25 with placeholders
+        # 6) Generate context-based placeholder actions
         while len(actions) < 25:
             i = len(actions) + 1
+            # Generate a context-based placeholder action
+            context_based_description = self._generate_context_based_action(conversation, goals, tasks, i)
             actions.append(CandidateAction(
-                description=f"Placeholder Action #{i}",
-                rationale="Example placeholder for demonstration",
+                description=context_based_description,
+                rationale="Generated based on current context and trajectory path",
                 priority=10
             ))
 
         # Return only first 25
         return actions[:25]
+
+    def _generate_context_based_action(self, conversation: "ConversationMemory", goals: List[Goal], tasks: List[Task], index: int) -> str:
+        """
+        Generate a context-based placeholder action description.
+        """
+        # Example logic to generate a context-based action
+        if goals:
+            active_goal = goals[0].name
+            return f"Explore further steps to achieve goal '{active_goal}' (Placeholder Action #{index})"
+        elif tasks:
+            pending_task = tasks[0].description
+            return f"Investigate pending task: '{pending_task}' (Placeholder Action #{index})"
+        else:
+            return f"Review recent conversation topics for insights (Placeholder Action #{index})"
 
     def _should_adjust_goal(self, goal: Goal) -> bool:
         """
