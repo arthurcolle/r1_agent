@@ -797,11 +797,24 @@ class R1Agent:
 
     def _call_external_tool(self, facts: List[str], thinking: str, answer: str) -> Optional[Dict[str, Any]]:
         """
-        Simulate a call to an external tool for data extraction.
+        Call an external tool for data extraction.
         """
-        # Placeholder for actual tool call logic
-        logger.info("[R1Agent] Calling external tool for data extraction...")
-        return {"extracted_facts": facts, "extracted_thinking": thinking, "extracted_answer": answer}
+        try:
+            # Import the bootstrapping_agent_v0 module
+            import bootstrapping_agent_v0
+
+            # Call a function from the module, e.g., extract_data
+            extracted_data = bootstrapping_agent_v0.extract_data(facts, thinking, answer)
+
+            logger.info(f"[R1Agent] Extracted data: {extracted_data}")
+            return extracted_data
+        except ImportError as e:
+            logger.error(f"[R1Agent] Error importing bootstrapping_agent_v0: {e}")
+        except AttributeError as e:
+            logger.error(f"[R1Agent] Function not found in bootstrapping_agent_v0: {e}")
+        except Exception as e:
+            logger.error(f"[R1Agent] Error calling external tool: {e}")
+        return None
         
     def _extract_structured_output(self, text: str) -> Tuple[List[str], str, str]:
         """Extract facts, thinking, and answer from structured output."""
