@@ -542,19 +542,34 @@ class FunctionAdapter:
     """
     def do_anything(self, snippet: str) -> Dict[str, Any]:
         code = snippet.strip()
-        import re
+        import re, io, sys
         code = re.sub(r"```python\s*", "", code)
         code = code.replace("```", "")
         code = re.sub(r"<code\s+language=['\"]python['\"]>\s*", "", code)
         code = code.replace("</code>", "")
         logger.info(f"[do_anything] Executing code:\n{code}")
+        old_stdout = sys.stdout
+        mystdout = io.StringIO()
+        sys.stdout = mystdout
         try:
             exec(code, globals(), locals())
-            return {"status": "success", "executed_code": code}
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"[do_anything] Error: {str(e)}\nTraceback:\n{tb}")
             return {"status": "error", "error": str(e), "traceback": tb}
+        finally:
+            sys.stdout = old_stdout
+
+        output = mystdout.getvalue()
+        logger.info(f"[do_anything] Execution output:\n{output}")
+        # Check for additional function calls in output
+        new_calls = re.findall(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", output, re.DOTALL)
+        if new_calls:
+            logger.info(f"[do_anything] Found nested function calls. Executing them recursively.")
+            for c in new_calls:
+                self.do_anything(c)
+
+        return {"status": "success", "executed_code": code, "output": output}
 
     def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
         pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
