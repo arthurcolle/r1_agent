@@ -417,6 +417,7 @@ class SmartTaskProcessor:
     - If a Task's description triggers a function call, we pass that to the FunctionAdapter.
     - We store results in memory, update the queue, etc.
     - Handles long-running tasks with progress updates
+    - Dynamically constructs environments and representations for OOD inputs
     """
 
     def __init__(self, memory_store: TaskMemoryStore, function_adapter: FunctionAdapter, task_queue: "PriorityTaskQueue"):
@@ -492,6 +493,11 @@ class SmartTaskProcessor:
             
             # Status update tasks
             "Long-running task with periodic": self._handle_periodic_updates,
+            
+            # Dynamic environment construction for OOD inputs
+            "Construct dynamic environment": self._handle_dynamic_environment,
+            "Handle OOD input": self._handle_dynamic_environment,
+            "Process out-of-distribution": self._handle_dynamic_environment,
             
             # Advanced computational tasks
             "Calculate the first 1000 digits": self._handle_calculate_pi,
@@ -3437,6 +3443,382 @@ class SmartTaskProcessor:
         except Exception as e:
             task.fail(f"Error calculating Recamán sequence: {str(e)}")
     
+    # ===== Dynamic Environment Construction for OOD Inputs =====
+    
+    def _handle_dynamic_environment(self, task: Task) -> None:
+        """Dynamically construct an environment for handling out-of-distribution inputs."""
+        try:
+            # Extract the OOD input from the task description
+            ood_input_match = re.search(r'OOD input[:\s]+[\'"]([^\'"]+)[\'"]', task.description, re.IGNORECASE)
+            ood_input = ood_input_match.group(1) if ood_input_match else "Unknown input"
+            
+            task.update_progress(0.1)
+            logger.info(f"[SmartTaskProcessor] Constructing dynamic environment for OOD input: {ood_input}")
+            
+            # Phase 1: Input Analysis
+            task.update_progress(0.2)
+            input_analysis = self._analyze_ood_input(ood_input)
+            
+            # Phase 2: Environment Construction
+            task.update_progress(0.4)
+            environment = self._construct_environment(input_analysis)
+            
+            # Phase 3: Representation Building
+            task.update_progress(0.6)
+            representation = self._build_representation(ood_input, environment)
+            
+            # Phase 4: Validation and Testing
+            task.update_progress(0.8)
+            validation_results = self._validate_environment(environment, representation, ood_input)
+            
+            # Compile results
+            result = {
+                "status": "success",
+                "ood_input": ood_input,
+                "input_analysis": input_analysis,
+                "environment": {
+                    "type": environment["type"],
+                    "dimensions": environment["dimensions"],
+                    "properties": environment["properties"]
+                },
+                "representation": {
+                    "format": representation["format"],
+                    "structure": representation["structure"],
+                    "sample": representation["sample"]
+                },
+                "validation": validation_results,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            task.update_progress(1.0)
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Successfully constructed dynamic environment for OOD input")
+        except Exception as e:
+            task.fail(f"Error constructing dynamic environment: {str(e)}")
+    
+    def _analyze_ood_input(self, input_text: str) -> dict:
+        """Analyze OOD input to determine its characteristics."""
+        import re
+        from collections import Counter
+        
+        # Determine if input is primarily numeric, text, or mixed
+        numeric_pattern = r'^[0-9\.\-\+eE]+$'
+        alpha_pattern = r'^[a-zA-Z\s\.\,\!\?\-\:\'\"]+$'
+        
+        # Count character types
+        char_counts = Counter(input_text)
+        digit_count = sum(char_counts[c] for c in char_counts if c.isdigit())
+        alpha_count = sum(char_counts[c] for c in char_counts if c.isalpha())
+        space_count = sum(char_counts[c] for c in char_counts if c.isspace())
+        symbol_count = len(input_text) - digit_count - alpha_count - space_count
+        
+        # Determine primary type
+        if digit_count > 0.7 * len(input_text):
+            primary_type = "numeric"
+        elif alpha_count > 0.7 * len(input_text):
+            primary_type = "text"
+        else:
+            primary_type = "mixed"
+        
+        # Check for specific patterns
+        patterns = {
+            "email": bool(re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', input_text)),
+            "url": bool(re.search(r'https?://[^\s]+', input_text)),
+            "date": bool(re.search(r'\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}', input_text)),
+            "json": input_text.strip().startswith('{') and input_text.strip().endswith('}'),
+            "list": input_text.strip().startswith('[') and input_text.strip().endswith(']'),
+            "code": bool(re.search(r'(def|class|function|import|from|var|const|let)\s', input_text))
+        }
+        
+        # Determine complexity
+        words = input_text.split()
+        avg_word_length = sum(len(word) for word in words) / len(words) if words else 0
+        complexity = {
+            "length": len(input_text),
+            "word_count": len(words),
+            "avg_word_length": avg_word_length,
+            "unique_chars": len(char_counts),
+            "entropy": sum(-count/len(input_text) * math.log2(count/len(input_text)) 
+                          for count in char_counts.values())
+        }
+        
+        return {
+            "primary_type": primary_type,
+            "composition": {
+                "digit_percentage": digit_count / len(input_text) if len(input_text) > 0 else 0,
+                "alpha_percentage": alpha_count / len(input_text) if len(input_text) > 0 else 0,
+                "space_percentage": space_count / len(input_text) if len(input_text) > 0 else 0,
+                "symbol_percentage": symbol_count / len(input_text) if len(input_text) > 0 else 0
+            },
+            "detected_patterns": patterns,
+            "complexity": complexity
+        }
+    
+    def _construct_environment(self, input_analysis: dict) -> dict:
+        """Construct an appropriate environment based on input analysis."""
+        env_type = "unknown"
+        dimensions = []
+        properties = {}
+        
+        # Determine environment type based on input analysis
+        if input_analysis["primary_type"] == "numeric":
+            env_type = "numerical"
+            dimensions = ["value", "precision", "range"]
+            properties = {
+                "continuous": True,
+                "bounded": False,
+                "operations": ["add", "subtract", "multiply", "divide"]
+            }
+        elif input_analysis["detected_patterns"]["code"]:
+            env_type = "code_execution"
+            dimensions = ["syntax", "semantics", "runtime"]
+            properties = {
+                "language": "python",  # Default assumption
+                "sandbox": True,
+                "operations": ["parse", "execute", "evaluate"]
+            }
+        elif input_analysis["detected_patterns"]["json"] or input_analysis["detected_patterns"]["list"]:
+            env_type = "structured_data"
+            dimensions = ["schema", "validation", "transformation"]
+            properties = {
+                "format": "json" if input_analysis["detected_patterns"]["json"] else "list",
+                "operations": ["parse", "query", "transform"]
+            }
+        elif input_analysis["detected_patterns"]["url"]:
+            env_type = "web_content"
+            dimensions = ["fetch", "parse", "extract"]
+            properties = {
+                "content_type": "unknown",
+                "operations": ["fetch", "parse", "extract"]
+            }
+        else:
+            # Default to text processing environment
+            env_type = "text_processing"
+            dimensions = ["tokenization", "analysis", "generation"]
+            properties = {
+                "language": "english",  # Default assumption
+                "operations": ["tokenize", "analyze", "generate"]
+            }
+        
+        # Add complexity-based properties
+        if input_analysis["complexity"]["length"] > 1000:
+            properties["chunking"] = True
+            properties["chunk_size"] = 500
+        
+        if input_analysis["complexity"]["entropy"] > 4.0:
+            properties["high_entropy"] = True
+            properties["compression"] = True
+        
+        return {
+            "type": env_type,
+            "dimensions": dimensions,
+            "properties": properties,
+            "created_at": datetime.now().isoformat()
+        }
+    
+    def _build_representation(self, input_text: str, environment: dict) -> dict:
+        """Build an appropriate representation for the input based on the environment."""
+        representation_format = "unknown"
+        structure = {}
+        sample = {}
+        
+        env_type = environment["type"]
+        
+        if env_type == "numerical":
+            # For numerical inputs, create a numerical representation
+            try:
+                # Try to parse as float first
+                value = float(input_text)
+                representation_format = "float"
+                structure = {
+                    "value": value,
+                    "is_integer": value.is_integer(),
+                    "sign": "positive" if value >= 0 else "negative"
+                }
+                sample = {
+                    "original": input_text,
+                    "normalized": value
+                }
+            except ValueError:
+                # If not a simple number, try to extract numbers
+                import re
+                numbers = re.findall(r'-?\d+\.?\d*', input_text)
+                representation_format = "numeric_sequence"
+                structure = {
+                    "count": len(numbers),
+                    "values": [float(n) for n in numbers]
+                }
+                sample = {
+                    "original": input_text,
+                    "extracted": numbers[:5]
+                }
+                
+        elif env_type == "code_execution":
+            # For code, create a code representation
+            import ast
+            representation_format = "code_ast"
+            try:
+                parsed_ast = ast.parse(input_text)
+                structure = {
+                    "type": "module",
+                    "body_length": len(parsed_ast.body),
+                    "contains_functions": any(isinstance(node, ast.FunctionDef) for node in ast.walk(parsed_ast)),
+                    "contains_classes": any(isinstance(node, ast.ClassDef) for node in ast.walk(parsed_ast)),
+                    "imports": [node.names[0].name for node in ast.walk(parsed_ast) 
+                               if isinstance(node, ast.Import) and node.names]
+                }
+                sample = {
+                    "original": input_text[:100] + ("..." if len(input_text) > 100 else ""),
+                    "ast_summary": str([(type(node).__name__, getattr(node, 'name', None)) 
+                                      for node in parsed_ast.body])
+                }
+            except SyntaxError:
+                # If not valid Python, treat as text
+                representation_format = "text"
+                structure = {
+                    "lines": input_text.count('\n') + 1,
+                    "tokens": len(input_text.split())
+                }
+                sample = {
+                    "original": input_text[:100] + ("..." if len(input_text) > 100 else "")
+                }
+                
+        elif env_type == "structured_data":
+            # For structured data, create a structured representation
+            import json
+            representation_format = "json"
+            try:
+                # Try to parse as JSON
+                parsed_json = json.loads(input_text)
+                structure = {
+                    "type": type(parsed_json).__name__,
+                    "depth": self._get_json_depth(parsed_json),
+                    "keys": list(parsed_json.keys()) if isinstance(parsed_json, dict) else None,
+                    "length": len(parsed_json) if hasattr(parsed_json, '__len__') else 1
+                }
+                sample = {
+                    "original": input_text[:100] + ("..." if len(input_text) > 100 else ""),
+                    "parsed": str(parsed_json)[:100] + ("..." if str(parsed_json) > 100 else "")
+                }
+            except (json.JSONDecodeError, TypeError):
+                # If not valid JSON, treat as text
+                representation_format = "text"
+                structure = {
+                    "lines": input_text.count('\n') + 1,
+                    "tokens": len(input_text.split())
+                }
+                sample = {
+                    "original": input_text[:100] + ("..." if len(input_text) > 100 else "")
+                }
+                
+        elif env_type == "web_content":
+            # For web content, create a URL representation
+            import re
+            representation_format = "url"
+            url_match = re.search(r'(https?://[^\s]+)', input_text)
+            if url_match:
+                url = url_match.group(1)
+                structure = {
+                    "url": url,
+                    "domain": url.split('/')[2] if '://' in url else None,
+                    "protocol": url.split('://')[0] if '://' in url else None
+                }
+                sample = {
+                    "original": input_text,
+                    "extracted_url": url
+                }
+            else:
+                # Fallback to text
+                representation_format = "text"
+                structure = {
+                    "lines": input_text.count('\n') + 1,
+                    "tokens": len(input_text.split())
+                }
+                sample = {
+                    "original": input_text[:100] + ("..." if len(input_text) > 100 else "")
+                }
+                
+        else:
+            # Default text processing
+            representation_format = "text"
+            words = input_text.split()
+            structure = {
+                "lines": input_text.count('\n') + 1,
+                "tokens": len(words),
+                "avg_token_length": sum(len(w) for w in words) / len(words) if words else 0
+            }
+            sample = {
+                "original": input_text[:100] + ("..." if len(input_text) > 100 else ""),
+                "tokens": words[:10] + (["..."] if len(words) > 10 else [])
+            }
+        
+        return {
+            "format": representation_format,
+            "structure": structure,
+            "sample": sample,
+            "created_at": datetime.now().isoformat()
+        }
+    
+    def _validate_environment(self, environment: dict, representation: dict, input_text: str) -> dict:
+        """Validate the constructed environment and representation against the input."""
+        validation_results = {
+            "is_valid": True,
+            "coverage": 1.0,
+            "confidence": 0.8,
+            "issues": []
+        }
+        
+        # Check if environment type matches representation format
+        expected_formats = {
+            "numerical": ["float", "numeric_sequence"],
+            "code_execution": ["code_ast", "text"],
+            "structured_data": ["json", "text"],
+            "web_content": ["url", "text"],
+            "text_processing": ["text"]
+        }
+        
+        if environment["type"] in expected_formats:
+            if representation["format"] not in expected_formats[environment["type"]]:
+                validation_results["is_valid"] = False
+                validation_results["confidence"] = 0.5
+                validation_results["issues"].append(
+                    f"Representation format '{representation['format']}' doesn't match environment type '{environment['type']}'"
+                )
+        
+        # Check for empty or minimal representation
+        if not representation["structure"]:
+            validation_results["is_valid"] = False
+            validation_results["confidence"] = 0.3
+            validation_results["issues"].append("Empty representation structure")
+        
+        # Check input coverage
+        if len(input_text) > 0:
+            # Calculate how much of the input is represented in the sample
+            sample_text = str(representation["sample"].get("original", ""))
+            if not sample_text:
+                validation_results["coverage"] = 0.0
+            elif len(sample_text) < len(input_text) and "..." in sample_text:
+                # Estimate coverage based on sample length
+                validation_results["coverage"] = len(sample_text.replace("...", "")) / len(input_text)
+            
+            if validation_results["coverage"] < 0.5:
+                validation_results["issues"].append(f"Low input coverage: {validation_results['coverage']:.2f}")
+        
+        return validation_results
+    
+    def _get_json_depth(self, obj, current_depth=0):
+        """Helper function to calculate the depth of a JSON object."""
+        if isinstance(obj, dict):
+            if not obj:
+                return current_depth
+            return max(self._get_json_depth(v, current_depth + 1) for v in obj.values())
+        elif isinstance(obj, list):
+            if not obj:
+                return current_depth
+            return max(self._get_json_depth(v, current_depth + 1) for v in obj)
+        else:
+            return current_depth
+    
     def _handle_calculation_task(self, task: Task) -> None:
         """
         Handle a task that performs calculations or data processing.
@@ -3698,9 +4080,12 @@ class R1Agent:
             "1. <function_call> do_anything: <code> </function_call> - Run arbitrary Python code\n"
             "2. <function_call> fetch_url: \"https://example.com\" </function_call> - Fetch content from a URL\n"
             "3. <function_call> summarize_html: \"<html>...</html>\" </function_call> - Extract text from HTML\n"
-            "4. Subtask(n)=1) 'Task description 1' 2) 'Task description 2' ... - Create n subtasks\n\n"
+            "4. Subtask(n)=1) 'Task description 1' 2) 'Task description 2' ... - Create n subtasks\n"
+            "5. Dynamic environment construction for out-of-distribution (OOD) inputs\n\n"
             "You can handle long-running operations by breaking them into subtasks. "
             "Tasks will be executed concurrently when possible, with proper dependency tracking.\n"
+            "For unexpected or out-of-distribution inputs, you can dynamically construct appropriate "
+            "environments and representations to process them effectively.\n"
             "</GRID>"
         )
 
@@ -4132,7 +4517,26 @@ def create_evaluation_tasks(agent: R1Agent) -> None:
         timeout_seconds=30
     ))
     
-    logger.info(f"[Evaluation] Created 40 evaluation tasks with various complexity levels, including advanced computational challenges")
+    # Dynamic environment construction for OOD inputs
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=36,
+        description="'Construct dynamic environment for OOD input: \"https://example.com/api/data.json?param=value&complex=true\"'",
+        timeout_seconds=30
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=37,
+        description="'Process out-of-distribution input: \"def calculate_fibonacci(n):\\n    if n <= 1:\\n        return n\\n    return calculate_fibonacci(n-1) + calculate_fibonacci(n-2)\"'",
+        timeout_seconds=30
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=38,
+        description="'Handle OOD input: \"{\\\"users\\\": [{\\\"id\\\": 1, \\\"name\\\": \\\"John\\\"}, {\\\"id\\\": 2, \\\"name\\\": \\\"Jane\\\"}], \\\"total\\\": 2}\"'",
+        timeout_seconds=30
+    ))
+    
+    logger.info(f"[Evaluation] Created 43 evaluation tasks with various complexity levels, including advanced computational challenges and dynamic environment construction")
 
 
 def main():
