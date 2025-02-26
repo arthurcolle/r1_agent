@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+import json
+from typing import List, Dict, Any
+try:
+    import together
+    from pydantic import BaseModel, Field
+except ImportError:
+    print("Please install the 'together-ai-client' and 'pydantic' packages before running this script.")
+    raise
+
+LOGS = """
+2025-02-26 14:00:02 [INFO] UltraAdvancedR1Agent - [SmartTaskProcessor] Starting task 1 - 'What is the weather on Saturn'
+2025-02-26 14:00:02 [INFO] UltraAdvancedR1Agent - [SelfReflectiveCognition] Reflected on task 1: status=COMPLETED, desc='What is the weather on Saturn'
+2025-02-26 14:00:02 [INFO] UltraAdvancedR1Agent - [SmartTaskProcessor] Completed task 1
+2025-02-26 14:00:06 [INFO] UltraAdvancedR1Agent - [SelfReflectiveCognition] Recent reflections => Reflected on task 1: status=COMPLETED, desc='What is the weather on Saturn'
+2025-02-26 14:00:16 [INFO] UltraAdvancedR1Agent - [PlanManager] Running long-range planning analysis...
+2025-02-26 14:00:16 [INFO] UltraAdvancedR1Agent - [ActionGenerator] Generating candidate actions (max 25).
+2025-02-26 14:00:16 [INFO] UltraAdvancedR1Agent - [PlanManager] Candidate actions: [CandidateAction(desc=Read code snippet: s, prio=3), CandidateAction(desc=Retrieve facts about, prio=5), CandidateAction(desc=Decompose goal 'Scal, prio=1), CandidateAction(desc=Placeholder Action #, prio=10), ...]
+...
+2025-02-26 14:05:16 [INFO] UltraAdvancedR1Agent - [PlanManager] Running long-range planning analysis...
+2025-02-26 14:05:16 [INFO] UltraAdvancedR1Agent - [ActionGenerator] Generating candidate actions (max 25).
+2025-02-26 14:05:16 [INFO] UltraAdvancedR1Agent - [PlanManager] Candidate actions: [CandidateAction(desc=Read code snippet: s, prio=3), CandidateAction(desc=Retrieve facts about, prio=5), CandidateAction(desc=Decompose goal 'Scal, prio=1), CandidateAction(desc=Placeholder Action #, prio=10), ...]
+"""
+
+class CandidateAction(BaseModel):
+    desc: str = Field(description="Description of the candidate action.")
+    prio: int = Field(description="Priority of the action. Lower is higher priority.")
+
+class CandidateActionsResponse(BaseModel):
+    actions: List[CandidateAction] = Field(description="List of generated candidate actions.")
+
+def ask_llm_for_json_structured_actions(logs_text: str) -> Dict[str, Any]:
+    """
+    Demonstration of how to use JSON mode with the Together API to parse or generate
+    structured data about candidate actions from logs or other context.
+    """
+
+    # In a real usage scenario, you might parse or condense logs_text,
+    # then feed it to the LLM to generate structured output in JSON form.
+
+    # For demonstration, we simply instruct the LLM to produce a JSON list of "desc" and "prio".
+    # You must ensure "CandidateActionsResponse.model_json_schema()" is used.
+    # Make sure you have your Together API key set up properly in your environment.
+    # Example:
+    #   export TOGETHER_API_KEY="YOUR_API_KEY"
+    #
+    # Then you can run this script:
+    #   python alien_weapon
+
+    # If you want to parse logs and pass them to the LLM, you might do some preprocessing here.
+
+    # We'll show a direct call to the LLM:
+    prompt_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an assistant that extracts or infers candidate actions from logs. "
+                "Only answer in valid JSON conforming to the provided schema."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Here are some logs:\n{logs_text}\nPlease produce a JSON list of candidate actions."
+        }
+    ]
+
+    # If you run this code, uncomment and fill in appropriate model name if needed:
+    # try:
+    #     response = together.chat.completions.create(
+    #         messages=prompt_messages,
+    #         model="meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+    #         temperature=0.0,
+    #         response_format={
+    #             "type": "json_object",
+    #             "schema": CandidateActionsResponse.model_json_schema(),
+    #         },
+    #     )
+    #     raw_json = response.choices[0].message.content
+    #     data = json.loads(raw_json)
+    # except Exception as e:
+    #     print("Error calling LLM or parsing JSON:", e)
+    #     return {}
+
+    # For demonstration, we'll just return a handcrafted example
+    data = {
+        "actions": [
+            {"desc": "Read code snippet: s", "prio": 3},
+            {"desc": "Retrieve facts about Saturn", "prio": 5},
+            {"desc": "Decompose goal 'Scal", "prio": 1}
+        ]
+    }
+
+    return data
+
+def main():
+    print("Demo: Generating structured candidate actions from logs in JSON mode:")
+    actions_data = ask_llm_for_json_structured_actions(LOGS)
+    print(json.dumps(actions_data, indent=2))
+
+if __name__ == "__main__":
+    main()
