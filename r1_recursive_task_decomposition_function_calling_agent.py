@@ -4949,6 +4949,7 @@ class CodeManager:
     
     async def stream_tokens(self, text: str, delay: float = 0.05) -> AsyncGenerator[str, None]:
         """Stream tokens from text with a delay between each token."""
+        import asyncio
         tokens = re.split(r"(\s+)", text)
         for token in tokens:
             await asyncio.sleep(delay)
