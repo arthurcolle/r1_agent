@@ -651,7 +651,12 @@ class SmartTaskProcessor:
             "Calculate the first 100 terms": self._handle_recaman_sequence,
         }
 
-    def process_task(self, task: Task) -> None:
+    def _has_subtasks(self, task: Task) -> bool:
+        """
+        Check if a task has any subtasks.
+        """
+        subtasks = self.memory_store.get_subtasks(task.task_id)
+        return len(subtasks) > 0
         """
         Main logic for how we handle tasks:
          - 'Recursive decomposition' if needed
