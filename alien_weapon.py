@@ -589,31 +589,28 @@ class FunctionAdapter:
         except Exception as e:
             return {"status": "error", "output": "", "error": str(e)}
 
-    def execute_python_code(self, code: str, long_running: bool = False, text: str = "") -> Dict[str, Any]:
+    def execute_python_code(self, code: str, long_running: bool = False) -> Dict[str, Any]:
         """
-        Execute Python code. If long_running is True, use threading to run it in the background.
+        Execute Python code. If long_running is True, use nohup to run it in the background as a separate process.
         """
-        import io, sys
-        old_stdout = sys.stdout
-        mystdout = io.StringIO()
-        sys.stdout = mystdout
+        import io, sys, tempfile, os
         try:
             if long_running:
-                thread = threading.Thread(target=exec, args=(code,), kwargs={"globals": globals(), "locals": locals()})
-                thread.start()
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
+                    temp_file.write(code)
+                    temp_file_path = temp_file.name
+                command = f"nohup python {temp_file_path} > /dev/null 2>&1 &"
+                os.system(command)
                 return {"status": "success", "output": "Code is running in the background"}
             else:
+                old_stdout = sys.stdout
+                mystdout = io.StringIO()
+                sys.stdout = mystdout
                 exec(code, globals(), locals())
+                sys.stdout = old_stdout
                 return {"status": "success", "output": mystdout.getvalue()}
         except Exception as e:
             return {"status": "error", "output": "", "error": str(e)}
-        finally:
-            sys.stdout = old_stdout
-        pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
-        match = re.search(pattern, text, re.DOTALL)
-        if not match:
-            return None
-        snippet = match.group(1)
         logger.info(f"[FunctionAdapter] Detected do_anything snippet:\n{snippet}")
         return self.do_anything(snippet)
 
