@@ -3841,9 +3841,8 @@ class SmartTaskProcessor:
                 # Create a new agent instance
                 agent = R1Agent()
             
-            # Retrieve code asynchronously
-            import asyncio
-            results = asyncio.run(agent.retrieve_code(query))
+            # Retrieve code
+            results = agent.retrieve_code(query)
             
             task.update_progress(0.9)
             
@@ -3919,9 +3918,8 @@ class SmartTaskProcessor:
                 # Create a new agent instance
                 agent = R1Agent()
             
-            # Modify code asynchronously
-            import asyncio
-            result = asyncio.run(agent.modify_code(element_type, name, new_code))
+            # Modify code
+            result = agent.modify_code(element_type, name, new_code)
             
             task.update_progress(0.9)
             
@@ -3964,9 +3962,8 @@ class SmartTaskProcessor:
                 # Create a new agent instance
                 agent = R1Agent()
             
-            # Retrieve code asynchronously
-            import asyncio
-            results = asyncio.run(agent.retrieve_code(query))
+            # Retrieve code
+            results = agent.retrieve_code(query)
             
             if not results:
                 task.complete({
@@ -4440,7 +4437,7 @@ class R1Agent:
             "current_status": self.get_task_status(task_id)
         }
 
-    async def load_own_code(self):
+    def load_own_code(self):
         """
         Load and index the agent's own code.
         Creates a collection in the knowledge base for code chunks.
@@ -4497,13 +4494,13 @@ class R1Agent:
             "total_chunks": len(functions) + len(classes)
         }
     
-    async def retrieve_code(self, query: str) -> List[Dict[str, Any]]:
+    def retrieve_code(self, query: str) -> List[Dict[str, Any]]:
         """
         Retrieve code chunks matching the query.
         """
         # Ensure code is loaded
         if not self.code_collection_id:
-            await self.load_own_code()
+            self.load_own_code()
         
         # Search for matching code chunks
         results = self.code_manager.search_code(query)
@@ -4519,12 +4516,12 @@ class R1Agent:
                         chunks.append(subtask.result)
                 
                 # Compute embedding for the query
-                query_embedding = await self.compute_embedding(query)
+                query_embedding = self.compute_embedding(query)
                 
                 # Compute embeddings for all chunks
                 chunk_embeddings = []
                 for chunk in chunks:
-                    chunk_embedding = await self.compute_embedding(chunk['content'])
+                    chunk_embedding = self.compute_embedding(chunk['content'])
                     chunk_embeddings.append((chunk, chunk_embedding))
                 
                 # Calculate similarity and sort results
@@ -4550,7 +4547,7 @@ class R1Agent:
         
         return results
     
-    async def modify_code(self, element_type: str, name: str, new_code: str) -> bool:
+    def modify_code(self, element_type: str, name: str, new_code: str) -> bool:
         """
         Modify a code element (function or method) with validation.
         
@@ -4617,12 +4614,12 @@ class R1Agent:
             task.fail(error_msg)
             return False
     
-    async def compute_embedding(self, text: str) -> List[float]:
+    def compute_embedding(self, text: str) -> List[float]:
         """
         Compute an embedding for the given text using the Together API.
         """
         try:
-            response = await self.client.embeddings.create(
+            response = self.client.embeddings.create(
                 model="togethercomputer/m2-bert-80M-8k-retrieval",
                 input=text
             )
