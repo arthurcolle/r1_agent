@@ -26,8 +26,13 @@ import threading
 import traceback
 import subprocess
 import requests
+import importlib
+import importlib.util
+import ast
+import hashlib
+import shutil
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union
+from typing import Any, Dict, List, Optional, Tuple, Callable, Union, AsyncGenerator
 from datetime import datetime, timedelta
 from together import Together
 
@@ -498,6 +503,11 @@ class SmartTaskProcessor:
             "Construct dynamic environment": self._handle_dynamic_environment,
             "Handle OOD input": self._handle_dynamic_environment,
             "Process out-of-distribution": self._handle_dynamic_environment,
+            
+            # Self-modification tasks
+            "Retrieve code": self._handle_retrieve_code,
+            "Modify code": self._handle_modify_code,
+            "Analyze code": self._handle_analyze_code,
             
             # Advanced computational tasks
             "Calculate the first 1000 digits": self._handle_calculate_pi,
@@ -3807,6 +3817,203 @@ class SmartTaskProcessor:
         
         return validation_results
     
+    def _handle_retrieve_code(self, task: Task) -> None:
+        """Handle retrieving code based on a query."""
+        try:
+            # Extract query from description
+            query_match = re.search(r'[\'"]([^\'"]+)[\'"]', task.description)
+            if not query_match:
+                task.fail("Could not extract query from task description")
+                return
+                
+            query = query_match.group(1)
+            task.update_progress(0.3)
+            
+            # Initialize the agent if needed
+            agent = None
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                if isinstance(attr, R1Agent):
+                    agent = attr
+                    break
+            
+            if not agent:
+                # Create a new agent instance
+                agent = R1Agent()
+            
+            # Retrieve code asynchronously
+            import asyncio
+            results = asyncio.run(agent.retrieve_code(query))
+            
+            task.update_progress(0.9)
+            
+            if results:
+                # Format results
+                formatted_results = []
+                for result in results:
+                    formatted_results.append({
+                        "type": result["type"],
+                        "name": result["name"],
+                        "start_line": result["start_line"],
+                        "end_line": result["end_line"],
+                        "content_preview": result["content"][:200] + "..." if len(result["content"]) > 200 else result["content"]
+                    })
+                
+                task.complete({
+                    "status": "success",
+                    "query": query,
+                    "results_count": len(results),
+                    "results": formatted_results,
+                    "timestamp": datetime.now().isoformat()
+                })
+            else:
+                task.complete({
+                    "status": "success",
+                    "query": query,
+                    "results_count": 0,
+                    "message": "No matching code found",
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+            logger.info(f"[SmartTaskProcessor] Retrieved {len(results)} code chunks matching '{query}'")
+            
+        except Exception as e:
+            task.fail(f"Error retrieving code: {str(e)}")
+    
+    def _handle_modify_code(self, task: Task) -> None:
+        """Handle modifying code."""
+        try:
+            # Extract parameters from description
+            element_type_match = re.search(r'(function|method|class) [\'"]([^\'"]+)[\'"]', task.description, re.IGNORECASE)
+            if not element_type_match:
+                task.fail("Could not extract element type and name from task description")
+                return
+                
+            element_type = element_type_match.group(1).lower()
+            name = element_type_match.group(2)
+            
+            # Get new code from task result or parent task
+            new_code = None
+            if task.result and isinstance(task.result, dict) and "new_code" in task.result:
+                new_code = task.result["new_code"]
+            elif task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result and isinstance(parent_task.result, dict):
+                    new_code = parent_task.result.get("new_code")
+            
+            if not new_code:
+                task.fail("No new code provided for modification")
+                return
+                
+            task.update_progress(0.3)
+            
+            # Initialize the agent if needed
+            agent = None
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                if isinstance(attr, R1Agent):
+                    agent = attr
+                    break
+            
+            if not agent:
+                # Create a new agent instance
+                agent = R1Agent()
+            
+            # Modify code asynchronously
+            import asyncio
+            result = asyncio.run(agent.modify_code(element_type, name, new_code))
+            
+            task.update_progress(0.9)
+            
+            if result:
+                task.complete({
+                    "status": "success",
+                    "element_type": element_type,
+                    "name": name,
+                    "message": f"Successfully modified {element_type} {name}",
+                    "timestamp": datetime.now().isoformat()
+                })
+                logger.info(f"[SmartTaskProcessor] Successfully modified {element_type} {name}")
+            else:
+                task.fail(f"Failed to modify {element_type} {name}")
+                
+        except Exception as e:
+            task.fail(f"Error modifying code: {str(e)}")
+    
+    def _handle_analyze_code(self, task: Task) -> None:
+        """Handle analyzing code for potential improvements."""
+        try:
+            # Extract query from description
+            query_match = re.search(r'[\'"]([^\'"]+)[\'"]', task.description)
+            if not query_match:
+                task.fail("Could not extract query from task description")
+                return
+                
+            query = query_match.group(1)
+            task.update_progress(0.2)
+            
+            # Initialize the agent if needed
+            agent = None
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                if isinstance(attr, R1Agent):
+                    agent = attr
+                    break
+            
+            if not agent:
+                # Create a new agent instance
+                agent = R1Agent()
+            
+            # Retrieve code asynchronously
+            import asyncio
+            results = asyncio.run(agent.retrieve_code(query))
+            
+            if not results:
+                task.complete({
+                    "status": "success",
+                    "query": query,
+                    "results_count": 0,
+                    "message": "No matching code found to analyze",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return
+                
+            task.update_progress(0.5)
+            
+            # Analyze the code using the LLM
+            code_to_analyze = results[0]["content"]  # Analyze the first matching result
+            
+            messages = [
+                {"role": "system", "content": "You are an expert code reviewer. Analyze the provided code and suggest improvements."},
+                {"role": "user", "content": f"Analyze this code and suggest improvements:\n\n{code_to_analyze}"}
+            ]
+            
+            response = agent.client.chat.completions.create(
+                model="o3-mini",
+                messages=messages,
+                temperature=0.2
+            )
+            
+            analysis = response.choices[0].message.content
+            
+            task.update_progress(0.9)
+            
+            task.complete({
+                "status": "success",
+                "query": query,
+                "analyzed_element": {
+                    "type": results[0]["type"],
+                    "name": results[0]["name"]
+                },
+                "analysis": analysis,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            logger.info(f"[SmartTaskProcessor] Analyzed {results[0]['type']} {results[0]['name']}")
+            
+        except Exception as e:
+            task.fail(f"Error analyzing code: {str(e)}")
+    
     def _get_json_depth(self, obj, current_depth=0):
         """Helper function to calculate the depth of a JSON object."""
         if isinstance(obj, dict):
@@ -4051,6 +4258,8 @@ class R1Agent:
     - Specialized handlers for common operations
     - Status reporting
     - Task dependency management
+    - Self-modification capabilities
+    - Code loading and management
     """
 
     def __init__(self, max_workers: int = 4):
@@ -4070,6 +4279,12 @@ class R1Agent:
             status_interval=5  # Report status every 5 seconds
         )
         self.client = Together()
+        
+        # Initialize code manager for self-modification
+        self.code_manager = CodeManager(__file__)
+        
+        # Collection for storing code chunks and reflections
+        self.code_collection_id = None
 
         # Enhanced system prompt describing capabilities
         self.system_prompt = (
@@ -4082,11 +4297,13 @@ class R1Agent:
             "2. <function_call> fetch_url: \"https://example.com\" </function_call> - Fetch content from a URL\n"
             "3. <function_call> summarize_html: \"<html>...</html>\" </function_call> - Extract text from HTML\n"
             "4. Subtask(n)=1) 'Task description 1' 2) 'Task description 2' ... - Create n subtasks\n"
-            "5. Dynamic environment construction for out-of-distribution (OOD) inputs\n\n"
+            "5. Dynamic environment construction for out-of-distribution (OOD) inputs\n"
+            "6. Self-modification: You can retrieve, analyze, and modify your own code\n\n"
             "You can handle long-running operations by breaking them into subtasks. "
             "Tasks will be executed concurrently when possible, with proper dependency tracking.\n"
             "For unexpected or out-of-distribution inputs, you can dynamically construct appropriate "
             "environments and representations to process them effectively.\n"
+            "You can also modify your own code to improve your capabilities or fix issues.\n"
             "</GRID>"
         )
 
@@ -4223,11 +4440,519 @@ class R1Agent:
             "current_status": self.get_task_status(task_id)
         }
 
+    async def load_own_code(self):
+        """
+        Load and index the agent's own code.
+        Creates a collection in the knowledge base for code chunks.
+        """
+        if not self.code_collection_id:
+            self.code_collection_id = self.memory_store.create_task(
+                priority=1,
+                description="Agent code collection",
+                timeout_seconds=None
+            ).task_id
+        
+        # Reload code to ensure we have the latest version
+        self.code_manager.load_code()
+        
+        # Index all functions and classes
+        functions = []
+        for name, info in self.code_manager.function_index.items():
+            code = self.code_manager.get_function(name)
+            if code:
+                functions.append({
+                    'type': 'function',
+                    'name': name,
+                    'start_line': info['start_line'],
+                    'end_line': info['end_line'],
+                    'content': code
+                })
+        
+        classes = []
+        for name, info in self.code_manager.class_index.items():
+            code = self.code_manager.get_class(name)
+            if code:
+                classes.append({
+                    'type': 'class',
+                    'name': name,
+                    'start_line': info['start_line'],
+                    'end_line': info['end_line'],
+                    'content': code
+                })
+        
+        # Store code chunks in memory store
+        for chunk in functions + classes:
+            chunk_task = self.memory_store.create_task(
+                priority=5,
+                description=f"Code chunk: {chunk['type']} {chunk['name']}",
+                parent_id=self.code_collection_id,
+                timeout_seconds=None
+            )
+            chunk_task.complete(chunk)
+        
+        logging.info(f"Loaded {len(functions)} functions and {len(classes)} classes")
+        return {
+            "functions": len(functions),
+            "classes": len(classes),
+            "total_chunks": len(functions) + len(classes)
+        }
+    
+    async def retrieve_code(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve code chunks matching the query.
+        """
+        # Ensure code is loaded
+        if not self.code_collection_id:
+            await self.load_own_code()
+        
+        # Search for matching code chunks
+        results = self.code_manager.search_code(query)
+        
+        # If no direct matches, try semantic search using embeddings
+        if not results and hasattr(self, 'compute_embedding'):
+            try:
+                # Get all code chunks
+                chunks = []
+                subtasks = self.memory_store.get_subtasks(self.code_collection_id)
+                for subtask in subtasks:
+                    if subtask.result:
+                        chunks.append(subtask.result)
+                
+                # Compute embedding for the query
+                query_embedding = await self.compute_embedding(query)
+                
+                # Compute embeddings for all chunks
+                chunk_embeddings = []
+                for chunk in chunks:
+                    chunk_embedding = await self.compute_embedding(chunk['content'])
+                    chunk_embeddings.append((chunk, chunk_embedding))
+                
+                # Calculate similarity and sort results
+                import numpy as np
+                from scipy import spatial
+                
+                scored_chunks = []
+                for chunk, embedding in chunk_embeddings:
+                    if embedding:
+                        similarity = 1 - spatial.distance.cosine(
+                            np.array(query_embedding), 
+                            np.array(embedding)
+                        )
+                        scored_chunks.append((chunk, similarity))
+                
+                # Sort by similarity
+                scored_chunks.sort(key=lambda x: x[1], reverse=True)
+                
+                # Return top results
+                results = [chunk for chunk, _ in scored_chunks[:5]]
+            except Exception as e:
+                logging.error(f"Error in semantic code search: {e}")
+        
+        return results
+    
+    async def modify_code(self, element_type: str, name: str, new_code: str) -> bool:
+        """
+        Modify a code element (function or method) with validation.
+        
+        Args:
+            element_type: 'function', 'class', or 'method'
+            name: Name of the element to modify (for methods, use 'class_name.method_name')
+            new_code: New code to replace the element with
+            
+        Returns:
+            bool: True if modification was successful, False otherwise
+        """
+        # Create a task for this modification
+        task = self.memory_store.create_task(
+            priority=1,
+            description=f"Modify {element_type} {name}",
+            timeout_seconds=30
+        )
+        task.start()
+        
+        try:
+            if element_type == 'function':
+                result = self.code_manager.safe_modify(
+                    self.code_manager.replace_function,
+                    name, new_code
+                )
+            elif element_type == 'method':
+                # Split class name and method name
+                if '.' in name:
+                    class_name, method_name = name.split('.', 1)
+                    result = self.code_manager.safe_modify(
+                        self.code_manager.replace_method,
+                        class_name, method_name, new_code
+                    )
+                else:
+                    task.fail(f"Invalid method name format: {name}. Use 'class_name.method_name'")
+                    return False
+            elif element_type == 'class':
+                result = self.code_manager.safe_modify(
+                    self.code_manager.replace_function,  # Classes are handled the same way
+                    name, new_code
+                )
+            else:
+                task.fail(f"Unknown element type: {element_type}")
+                return False
+            
+            if result:
+                # Reload code after successful modification
+                await self.load_own_code()
+                
+                task.complete({
+                    "status": "success",
+                    "element_type": element_type,
+                    "name": name,
+                    "timestamp": datetime.now().isoformat()
+                })
+                return True
+            else:
+                task.fail("Modification failed during validation")
+                return False
+                
+        except Exception as e:
+            error_msg = f"Error modifying code: {str(e)}"
+            logging.error(error_msg)
+            task.fail(error_msg)
+            return False
+    
+    async def compute_embedding(self, text: str) -> List[float]:
+        """
+        Compute an embedding for the given text using the Together API.
+        """
+        try:
+            response = await self.client.embeddings.create(
+                model="togethercomputer/m2-bert-80M-8k-retrieval",
+                input=text
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            logging.error(f"Error computing embedding: {e}")
+            return None
+    
     def shutdown(self):
         """
         Cleanly shut down the scheduler, thread pool, etc.
         """
         self.scheduler.stop_scheduler()
+
+###############################################################################
+# CODE MANAGER FOR SELF-MODIFICATION
+###############################################################################
+
+class CodeManager:
+    """
+    Manages the agent's source code with capabilities for:
+    - Loading and parsing the agent's own code
+    - Retrieving specific functions or classes
+    - Modifying code with validation and error handling
+    - Creating backups before modifications
+    - Restoring from backups if modifications fail
+    """
+    def __init__(self, file_path: str = None):
+        """Initialize with the path to the agent's source code file."""
+        self.file_path = file_path or __file__
+        self.backup_path = f"{self.file_path}.bak"
+        self.lines = []
+        self.ast_tree = None
+        self.function_index = {}  # Maps function names to line ranges
+        self.class_index = {}     # Maps class names to line ranges
+        self.load_code()
+    
+    def load_code(self):
+        """Load the agent's source code and parse it."""
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                self.lines = f.readlines()
+            
+            # Parse the code with AST to index functions and classes
+            source = "".join(self.lines)
+            self.ast_tree = ast.parse(source)
+            self._index_code_elements()
+            
+            logging.info(f"Loaded {len(self.lines)} lines of code from {self.file_path}")
+            return True
+        except Exception as e:
+            logging.error(f"Error loading code: {e}")
+            return False
+    
+    def _index_code_elements(self):
+        """Index all functions and classes in the code."""
+        self.function_index = {}
+        self.class_index = {}
+        
+        for node in ast.walk(self.ast_tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.function_index[node.name] = {
+                    'start_line': node.lineno,
+                    'end_line': node.end_lineno,
+                    'ast_node': node
+                }
+            elif isinstance(node, ast.ClassDef):
+                self.class_index[node.name] = {
+                    'start_line': node.lineno,
+                    'end_line': node.end_lineno,
+                    'ast_node': node,
+                    'methods': {}
+                }
+                # Index methods within the class
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        self.class_index[node.name]['methods'][item.name] = {
+                            'start_line': item.lineno,
+                            'end_line': item.end_lineno,
+                            'ast_node': item
+                        }
+    
+    def get_function(self, name: str) -> Optional[str]:
+        """Get the source code of a specific function."""
+        if name in self.function_index:
+            info = self.function_index[name]
+            start = info['start_line'] - 1  # Convert to 0-based indexing
+            end = info['end_line']
+            return "".join(self.lines[start:end])
+        return None
+    
+    def get_class(self, name: str) -> Optional[str]:
+        """Get the source code of a specific class."""
+        if name in self.class_index:
+            info = self.class_index[name]
+            start = info['start_line'] - 1  # Convert to 0-based indexing
+            end = info['end_line']
+            return "".join(self.lines[start:end])
+        return None
+    
+    def get_method(self, class_name: str, method_name: str) -> Optional[str]:
+        """Get the source code of a specific method within a class."""
+        if class_name in self.class_index and method_name in self.class_index[class_name]['methods']:
+            info = self.class_index[class_name]['methods'][method_name]
+            start = info['start_line'] - 1  # Convert to 0-based indexing
+            end = info['end_line']
+            return "".join(self.lines[start:end])
+        return None
+    
+    def search_code(self, query: str) -> List[Dict[str, Any]]:
+        """Search for code elements matching the query."""
+        results = []
+        query_lower = query.lower()
+        
+        # Search functions
+        for name, info in self.function_index.items():
+            if query_lower in name.lower():
+                code = self.get_function(name)
+                results.append({
+                    'type': 'function',
+                    'name': name,
+                    'start_line': info['start_line'],
+                    'end_line': info['end_line'],
+                    'content': code
+                })
+        
+        # Search classes
+        for name, info in self.class_index.items():
+            if query_lower in name.lower():
+                code = self.get_class(name)
+                results.append({
+                    'type': 'class',
+                    'name': name,
+                    'start_line': info['start_line'],
+                    'end_line': info['end_line'],
+                    'content': code
+                })
+            
+            # Search methods within classes
+            for method_name, method_info in info['methods'].items():
+                if query_lower in method_name.lower():
+                    code = self.get_method(name, method_name)
+                    results.append({
+                        'type': 'method',
+                        'name': method_name,
+                        'class_name': name,
+                        'start_line': method_info['start_line'],
+                        'end_line': method_info['end_line'],
+                        'content': code
+                    })
+        
+        return results
+    
+    def backup(self):
+        """Create a backup of the current code."""
+        try:
+            shutil.copy2(self.file_path, self.backup_path)
+            logging.info(f"Created backup at {self.backup_path}")
+            return True
+        except Exception as e:
+            logging.error(f"Error creating backup: {e}")
+            return False
+    
+    def restore_backup(self):
+        """Restore code from backup."""
+        try:
+            if os.path.exists(self.backup_path):
+                shutil.copy2(self.backup_path, self.file_path)
+                self.load_code()  # Reload the code
+                logging.info(f"Restored from backup {self.backup_path}")
+                return True
+            else:
+                logging.error("No backup file found")
+                return False
+        except Exception as e:
+            logging.error(f"Error restoring backup: {e}")
+            return False
+    
+    def set_line(self, line_number: int, new_line: str):
+        """Replace a specific line with new content."""
+        if 0 <= line_number < len(self.lines):
+            self.lines[line_number] = new_line if new_line.endswith('\n') else new_line + '\n'
+            return True
+        return False
+    
+    def replace_block(self, start_marker: str, end_marker: str, new_block: List[str]):
+        """Replace a block of code between markers with new content."""
+        start_idx = -1
+        end_idx = -1
+        
+        for i, line in enumerate(self.lines):
+            if start_marker in line and start_idx == -1:
+                start_idx = i
+            elif end_marker in line and start_idx != -1:
+                end_idx = i
+                break
+        
+        if start_idx != -1 and end_idx != -1:
+            # Ensure new lines end with newline character
+            new_block_with_newlines = []
+            for line in new_block:
+                if not line.endswith('\n'):
+                    line += '\n'
+                new_block_with_newlines.append(line)
+            
+            # Replace the block
+            self.lines[start_idx:end_idx+1] = new_block_with_newlines
+            return True
+        
+        return False
+    
+    def replace_function(self, function_name: str, new_code: str) -> bool:
+        """Replace a function with new code."""
+        if function_name in self.function_index:
+            info = self.function_index[function_name]
+            start = info['start_line'] - 1
+            end = info['end_line']
+            
+            # Ensure new code ends with newline
+            if not new_code.endswith('\n'):
+                new_code += '\n'
+            
+            # Split new code into lines
+            new_lines = new_code.splitlines(True)
+            
+            # Replace the function
+            self.lines[start:end] = new_lines
+            
+            # Reindex the code
+            self.load_code()
+            return True
+        
+        return False
+    
+    def replace_method(self, class_name: str, method_name: str, new_code: str) -> bool:
+        """Replace a method within a class with new code."""
+        if (class_name in self.class_index and 
+            method_name in self.class_index[class_name]['methods']):
+            
+            info = self.class_index[class_name]['methods'][method_name]
+            start = info['start_line'] - 1
+            end = info['end_line']
+            
+            # Ensure new code ends with newline
+            if not new_code.endswith('\n'):
+                new_code += '\n'
+            
+            # Split new code into lines
+            new_lines = new_code.splitlines(True)
+            
+            # Replace the method
+            self.lines[start:end] = new_lines
+            
+            # Reindex the code
+            self.load_code()
+            return True
+        
+        return False
+    
+    def save(self) -> bool:
+        """Save changes to the file."""
+        try:
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                f.writelines(self.lines)
+            logging.info(f"Saved changes to {self.file_path}")
+            return True
+        except Exception as e:
+            logging.error(f"Error saving changes: {e}")
+            return False
+    
+    def validate_changes(self) -> bool:
+        """Validate that the modified code compiles."""
+        try:
+            source = "".join(self.lines)
+            ast.parse(source)  # Try to parse the modified code
+            
+            # Try to compile the code
+            compile(source, self.file_path, 'exec')
+            
+            logging.info("Code validation successful")
+            return True
+        except Exception as e:
+            logging.error(f"Code validation failed: {e}")
+            return False
+    
+    def safe_modify(self, modification_func, *args, **kwargs) -> bool:
+        """
+        Safely modify the code with backup and validation.
+        
+        Args:
+            modification_func: Function that performs the modification
+            *args, **kwargs: Arguments to pass to the modification function
+            
+        Returns:
+            bool: True if modification was successful, False otherwise
+        """
+        # Create backup
+        if not self.backup():
+            return False
+        
+        try:
+            # Apply modification
+            result = modification_func(*args, **kwargs)
+            if not result:
+                logging.error("Modification function returned False")
+                self.restore_backup()
+                return False
+            
+            # Validate changes
+            if not self.validate_changes():
+                self.restore_backup()
+                return False
+            
+            # Save changes
+            if not self.save():
+                self.restore_backup()
+                return False
+            
+            return True
+        except Exception as e:
+            logging.error(f"Error during safe modification: {e}")
+            self.restore_backup()
+            return False
+    
+    async def stream_tokens(self, text: str, delay: float = 0.05) -> AsyncGenerator[str, None]:
+        """Stream tokens from text with a delay between each token."""
+        tokens = re.split(r"(\s+)", text)
+        for token in tokens:
+            await asyncio.sleep(delay)
+            yield token
 
 ###############################################################################
 # MAIN DEMO
@@ -4537,7 +5262,36 @@ def create_evaluation_tasks(agent: R1Agent) -> None:
         timeout_seconds=30
     ))
     
-    logger.info(f"[Evaluation] Created 43 evaluation tasks with various complexity levels, including advanced computational challenges and dynamic environment construction")
+    # Code management and self-modification tasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=39,
+        description="'Retrieve code for \"task queue\"'",
+        timeout_seconds=30
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=40,
+        description="'Analyze code for \"SmartTaskProcessor\"'",
+        timeout_seconds=45
+    ))
+    
+    # Create a subtask chain for code modification
+    code_mod_parent = agent.memory_store.create_task(
+        priority=41,
+        description="'Modify code with validation and testing'",
+        timeout_seconds=60
+    )
+    agent.task_queue.push(code_mod_parent)
+    
+    # Add subtasks for the code modification
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=41,
+        description="Subtask(3)=1) 'Retrieve code for \"_handle_calculation_task\"' 2) 'Analyze code for potential improvements' 3) 'Modify function \"_handle_calculation_task\" with improved implementation'",
+        parent_id=code_mod_parent.task_id,
+        timeout_seconds=60
+    ))
+    
+    logger.info(f"[Evaluation] Created 47 evaluation tasks with various complexity levels, including advanced computational challenges, dynamic environment construction, and code self-modification")
 
 
 def main():
