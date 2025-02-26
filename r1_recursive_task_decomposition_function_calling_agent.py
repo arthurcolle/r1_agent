@@ -12918,6 +12918,7 @@ def create_evaluation_tasks(agent: R1Agent) -> None:
     ))
     
     logger.info(f"[Evaluation] Created 13 advanced initial tasks covering multi-step research, data analysis, financial modeling, technical deep dives, legal regulation, sustainability, and self-improvement challenges.")
+    agent.task_queue.push(agent.memory_store.create_task(
         description="'Compile a research report on mRNA vaccine technology advancements since 2020'",
         timeout_seconds=90
     ))
