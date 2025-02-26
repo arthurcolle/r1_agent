@@ -607,6 +607,15 @@ class FunctionAdapter:
         except Exception as e:
             return {"status": "error", "output": "", "error": str(e)}
 
+    def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
+        pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
+        match = re.search(pattern, text, re.DOTALL)
+        if not match:
+            return None
+        snippet = match.group(1)
+        logger.info(f"[FunctionAdapter] Detected do_anything snippet:\n{snippet}")
+        return self.do_anything(snippet)
+
 ###############################################################################
 # SMART TASK PROCESSOR
 ###############################################################################
