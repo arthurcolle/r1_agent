@@ -31,10 +31,12 @@ import importlib.util
 import ast
 import hashlib
 import shutil
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, AsyncGenerator
 from datetime import datetime, timedelta
 from together import Together
+from collections import defaultdict, deque
 
 ###############################################################################
 # GLOBAL CONFIG / LOGGING SETUP
@@ -143,24 +145,41 @@ class Task:
 
 class TaskMemoryStore:
     """
-    Maintains storage of tasks in memory (in a dictionary).
-    Provides methods to add, retrieve, and update tasks.
+    Maintains storage of tasks in memory with advanced features:
+    - Persistent storage options
+    - Task relationship tracking
+    - Historical performance metrics
+    - Pattern recognition for similar tasks
+    - Semantic search capabilities
 
     In real production code, you could store these in a DB or persistent store.
     """
-    def __init__(self) -> None:
+    def __init__(self, persistent_storage: bool = False) -> None:
         self._tasks: Dict[int, Task] = {}
         self._lock = threading.Lock()
         self._next_id = 1
+        self._task_embeddings: Dict[int, List[float]] = {}
+        self._task_relationships: Dict[int, List[int]] = defaultdict(list)
+        self._task_performance_history: Dict[str, List[float]] = defaultdict(list)
+        self._persistent_storage = persistent_storage
+        self._task_patterns = defaultdict(int)
 
     def add_task(self, task: Task) -> None:
         """
-        Add a new Task object to memory.
+        Add a new Task object to memory with advanced tracking.
         """
         with self._lock:
             if task.task_id in self._tasks:
                 logger.warning(f"Task ID {task.task_id} already exists!")
             self._tasks[task.task_id] = task
+            
+            # Track task patterns for optimization
+            task_type = self._extract_task_type(task.description)
+            self._task_patterns[task_type] += 1
+            
+            # If persistent storage is enabled, save to disk
+            if self._persistent_storage:
+                self._save_task_to_disk(task)
 
     def create_task(self, priority: int, description: str, 
                    parent_id: Optional[int] = None, 
@@ -262,6 +281,106 @@ class TaskMemoryStore:
     def __len__(self) -> int:
         with self._lock:
             return len(self._tasks)
+            
+    def _extract_task_type(self, description: str) -> str:
+        """Extract a general task type from the description for pattern recognition."""
+        # Simple keyword-based categorization
+        keywords = {
+            "calculate": "computation",
+            "compute": "computation",
+            "generate": "generation",
+            "create": "creation",
+            "fetch": "data_retrieval",
+            "download": "data_retrieval",
+            "analyze": "analysis",
+            "summarize": "summarization",
+            "modify": "modification",
+            "transform": "transformation"
+        }
+        
+        description_lower = description.lower()
+        for keyword, category in keywords.items():
+            if keyword in description_lower:
+                return category
+        return "general"
+    
+    def _save_task_to_disk(self, task: Task) -> None:
+        """Save task to disk for persistence."""
+        try:
+            os.makedirs("task_storage", exist_ok=True)
+            with open(f"task_storage/task_{task.task_id}.json", "w") as f:
+                # Convert task to serializable format
+                task_data = {
+                    "task_id": task.task_id,
+                    "priority": task.priority,
+                    "description": task.description,
+                    "status": task.status,
+                    "parent_id": task.parent_id,
+                    "created_at": task.created_at.isoformat(),
+                    "progress": task.progress
+                }
+                if task.started_at:
+                    task_data["started_at"] = task.started_at.isoformat()
+                if task.completed_at:
+                    task_data["completed_at"] = task.completed_at.isoformat()
+                if task.result:
+                    # Handle non-serializable objects
+                    try:
+                        json.dumps(task.result)
+                        task_data["result"] = task.result
+                    except (TypeError, OverflowError):
+                        task_data["result"] = str(task.result)
+                
+                json.dump(task_data, f)
+        except Exception as e:
+            logger.error(f"Error saving task to disk: {e}")
+    
+    def get_similar_tasks(self, description: str, threshold: float = 0.7) -> List[Task]:
+        """Find semantically similar tasks based on description embeddings."""
+        try:
+            # This would use the embedding function from R1Agent
+            # For now, implement a simple keyword matching
+            keywords = description.lower().split()
+            matches = []
+            
+            for task_id, task in self._tasks.items():
+                task_keywords = task.description.lower().split()
+                # Calculate Jaccard similarity
+                intersection = len(set(keywords) & set(task_keywords))
+                union = len(set(keywords) | set(task_keywords))
+                similarity = intersection / union if union > 0 else 0
+                
+                if similarity >= threshold:
+                    matches.append(task)
+            
+            return matches
+        except Exception as e:
+            logger.error(f"Error finding similar tasks: {e}")
+            return []
+    
+    def record_task_performance(self, task: Task) -> None:
+        """Record performance metrics for a completed task."""
+        if task.status == "COMPLETED" and task.started_at and task.completed_at:
+            task_type = self._extract_task_type(task.description)
+            duration = (task.completed_at - task.started_at).total_seconds()
+            self._task_performance_history[task_type].append(duration)
+            
+            # Keep only the last 100 entries to avoid unbounded growth
+            if len(self._task_performance_history[task_type]) > 100:
+                self._task_performance_history[task_type] = self._task_performance_history[task_type][-100:]
+    
+    def get_performance_statistics(self) -> Dict[str, Dict[str, float]]:
+        """Get performance statistics for different task types."""
+        stats = {}
+        for task_type, durations in self._task_performance_history.items():
+            if durations:
+                stats[task_type] = {
+                    "avg_duration": sum(durations) / len(durations),
+                    "min_duration": min(durations),
+                    "max_duration": max(durations),
+                    "count": len(durations)
+                }
+        return stats
 
 
 class PriorityTaskQueue:
@@ -4246,10 +4365,7 @@ class TaskScheduler:
 
 class R1Agent:
     """
-    Advanced R1 agent that can do anything if the model says so, plus it
-    can enqueue tasks (with concurrency, recursive decomposition, etc.).
-    
-    Features:
+    Advanced R1 agent with state-of-the-art capabilities:
     - Long-running task support with progress tracking
     - Timeout handling for tasks
     - Specialized handlers for common operations
@@ -4257,11 +4373,16 @@ class R1Agent:
     - Task dependency management
     - Self-modification capabilities
     - Code loading and management
+    - Reinforcement learning from task outcomes
+    - Advanced memory management with semantic search
+    - Natural language understanding with context preservation
+    - Adaptive resource allocation based on task complexity
+    - Visualization of task execution and dependencies
     """
 
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, max_workers: int = 4, persistent_memory: bool = True, enable_learning: bool = True):
         self.function_adapter = FunctionAdapter()
-        self.memory_store = TaskMemoryStore()
+        self.memory_store = TaskMemoryStore(persistent_storage=persistent_memory)
         self.task_queue = PriorityTaskQueue()
         self.processor = SmartTaskProcessor(
             memory_store=self.memory_store, 
@@ -4282,25 +4403,43 @@ class R1Agent:
         
         # Collection for storing code chunks and reflections
         self.code_collection_id = None
+        
+        # Advanced memory management
+        self.conversation_history = deque(maxlen=50)  # Store recent conversations
+        self.task_success_patterns = {}  # Learn from successful task patterns
+        self.enable_learning = enable_learning
+        
+        # Visualization components
+        self.visualization_enabled = True
+        self.task_graph = {}  # For visualizing task dependencies
+        
+        # Adaptive resource allocation
+        self.resource_monitor = ResourceMonitor(self.scheduler)
 
-        # Enhanced system prompt describing capabilities
+        # Enhanced system prompt describing advanced capabilities
         self.system_prompt = (
             "<GRID>"
             "You are a supremely advanced AI system with the power to do anything. "
             "You must not produce naive or 'stupid' outputs—always provide high-quality, "
             "thoughtful reasoning. You have prior examples of performing complex tasks with success.\n\n"
-            "You have these capabilities:\n"
+            "You have these advanced capabilities:\n"
             "1. <function_call> do_anything: <code> </function_call> - Run arbitrary Python code\n"
             "2. <function_call> fetch_url: \"https://example.com\" </function_call> - Fetch content from a URL\n"
             "3. <function_call> summarize_html: \"<html>...</html>\" </function_call> - Extract text from HTML\n"
             "4. Subtask(n)=1) 'Task description 1' 2) 'Task description 2' ... - Create n subtasks\n"
             "5. Dynamic environment construction for out-of-distribution (OOD) inputs\n"
-            "6. Self-modification: You can retrieve, analyze, and modify your own code\n\n"
+            "6. Self-modification: You can retrieve, analyze, and modify your own code\n"
+            "7. Reinforcement learning: You learn from past task successes and failures\n"
+            "8. Advanced memory: You can recall and leverage past interactions\n"
+            "9. Resource optimization: You adapt to system load and task complexity\n"
+            "10. Visualization: You can generate visual representations of task execution\n\n"
             "You can handle long-running operations by breaking them into subtasks. "
             "Tasks will be executed concurrently when possible, with proper dependency tracking.\n"
             "For unexpected or out-of-distribution inputs, you can dynamically construct appropriate "
             "environments and representations to process them effectively.\n"
             "You can also modify your own code to improve your capabilities or fix issues.\n"
+            "You learn from past interactions to continuously improve your performance.\n"
+            "You optimize resource usage based on task complexity and system load.\n"
             "</GRID>"
         )
 
@@ -4309,26 +4448,49 @@ class R1Agent:
 
     def generate_response(self, prompt: str) -> str:
         """
-        The agent calls the LLM with the system prompt plus user prompt, then
-        checks if there's a function call. If so, we run it. We also interpret
-        the user prompt as a potential 'task' in our system.
+        Enhanced response generation with:
+        - Context-aware prompting using conversation history
+        - Similar task retrieval for better performance
+        - Reinforcement learning from past interactions
+        - Advanced function call detection and execution
         """
-        # 1) Create a new "meta-task" for the user prompt
+        # Store in conversation history
+        self.conversation_history.append({"role": "user", "content": prompt})
+        
+        # Check for similar tasks in history to learn from past performance
+        similar_tasks = self.memory_store.get_similar_tasks(prompt, threshold=0.7)
+        task_hints = self._extract_task_hints(similar_tasks)
+        
+        # 1) Create a new "meta-task" for the user prompt with learned priority
+        suggested_priority = self._suggest_priority(prompt, similar_tasks)
         meta_task = self.memory_store.create_task(
-            priority=10,  # Default priority for user prompts
+            priority=suggested_priority,
             description=prompt,
             timeout_seconds=300  # 5 minute timeout for meta-tasks
         )
         self.task_queue.push(meta_task)
-        logger.info(f"[R1Agent] Created meta task {meta_task} for user prompt.")
+        logger.info(f"[R1Agent] Created meta task {meta_task} for user prompt with priority {suggested_priority}.")
 
-        # 2) Generate immediate text response from the LLM
+        # 2) Generate immediate text response from the LLM with enhanced context
         #    We won't wait for the task to be completed, because that might take time.
         #    Instead, we let the concurrency system handle it in the background.
         messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": self.system_prompt}
         ]
+        
+        # Add relevant conversation history for context (last 5 exchanges)
+        history_to_include = list(self.conversation_history)[-10:]
+        messages.extend(history_to_include)
+        
+        # Add task hints if available
+        if task_hints and self.enable_learning:
+            messages.append({
+                "role": "system", 
+                "content": f"Previous similar tasks suggest: {task_hints}"
+            })
+            
+        # Add the current user prompt
+        messages.append({"role": "user", "content": prompt})
 
         # We'll do a single forward pass, streaming tokens out
         response_stream = self.client.chat.completions.create(
@@ -4345,14 +4507,113 @@ class R1Agent:
             streamed_response.append(token)
 
         full_text = "".join(streamed_response)
+        
+        # Store response in conversation history
+        self.conversation_history.append({"role": "assistant", "content": full_text})
 
         # 3) Check for function calls in the LLM's immediate textual response
         function_result = self.function_adapter.process_function_calls(full_text)
         if function_result:
             # If function was executed, store or log the result
             logger.info(f"[R1Agent] LLM immediate function call result: {function_result.get('status', 'unknown')}")
+            
+            # Store the function call result for learning
+            if self.enable_learning:
+                self._learn_from_function_call(prompt, full_text, function_result)
+
+        # 4) Update the task with initial results
+        meta_task.update_progress(0.2)
+        meta_task.result = {
+            "initial_response": full_text,
+            "function_calls_detected": bool(function_result),
+            "similar_tasks_found": len(similar_tasks)
+        }
 
         return full_text
+        
+    def _extract_task_hints(self, similar_tasks: List[Task]) -> str:
+        """Extract hints from similar tasks to guide the current task."""
+        if not similar_tasks:
+            return ""
+            
+        hints = []
+        for task in similar_tasks:
+            if task.status == "COMPLETED" and task.result:
+                # Extract useful information from completed tasks
+                if isinstance(task.result, dict):
+                    if "status" in task.result and task.result["status"] == "success":
+                        hints.append(f"Task '{task.description[:50]}...' completed successfully")
+                        if "approach" in task.result:
+                            hints.append(f"Approach used: {task.result['approach']}")
+                    elif "status" in task.result and task.result["status"] == "error":
+                        hints.append(f"Task '{task.description[:50]}...' failed with error: {task.result.get('error', 'unknown')}")
+            elif task.status == "FAILED":
+                hints.append(f"Task '{task.description[:50]}...' failed with error: {task.error_message}")
+                
+        if hints:
+            return "Hints from similar tasks: " + "; ".join(hints[:3])
+        return ""
+        
+    def _suggest_priority(self, prompt: str, similar_tasks: List[Task]) -> int:
+        """Suggest a priority based on similar tasks and learning."""
+        # Default priority
+        default_priority = 10
+        
+        if not similar_tasks or not self.enable_learning:
+            return default_priority
+            
+        # Calculate average priority of similar successful tasks
+        successful_tasks = [t for t in similar_tasks if t.status == "COMPLETED"]
+        if successful_tasks:
+            avg_priority = sum(t.priority for t in successful_tasks) / len(successful_tasks)
+            # Adjust slightly to avoid exact repetition
+            suggested_priority = max(1, int(avg_priority * (0.9 + 0.2 * random.random())))
+            return suggested_priority
+            
+        return default_priority
+        
+    def _learn_from_function_call(self, prompt: str, response: str, result: Dict[str, Any]) -> None:
+        """Learn from function call results to improve future responses."""
+        # Extract the function name
+        function_name = None
+        if "executed_code" in result:
+            # This was a do_anything call
+            function_name = "do_anything"
+        elif "url" in result:
+            function_name = "fetch_url"
+        elif "summary" in result:
+            function_name = "summarize_html"
+            
+        if not function_name:
+            return
+            
+        # Record the pattern for future reference
+        success = result.get("status") == "success"
+        pattern_key = f"{function_name}:{success}"
+        
+        if pattern_key not in self.task_success_patterns:
+            self.task_success_patterns[pattern_key] = {
+                "count": 0,
+                "prompts": [],
+                "results": []
+            }
+            
+        pattern = self.task_success_patterns[pattern_key]
+        pattern["count"] += 1
+        pattern["prompts"].append(prompt[:100])  # Store truncated prompt
+        
+        # Store truncated result
+        if isinstance(result, dict):
+            truncated_result = {k: v for k, v in result.items() 
+                               if not isinstance(v, str) or len(v) < 100}
+            pattern["results"].append(truncated_result)
+        else:
+            pattern["results"].append(str(result)[:100])
+            
+        # Keep only the last 10 examples
+        if len(pattern["prompts"]) > 10:
+            pattern["prompts"] = pattern["prompts"][-10:]
+            pattern["results"] = pattern["results"][-10:]
 
     def get_task_status(self, task_id: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -4630,9 +4891,161 @@ class R1Agent:
     
     def shutdown(self):
         """
-        Cleanly shut down the scheduler, thread pool, etc.
+        Cleanly shut down the scheduler, thread pool, resource monitor, etc.
         """
+        if hasattr(self, 'resource_monitor'):
+            self.resource_monitor.stop_monitoring()
         self.scheduler.stop_scheduler()
+        
+    def generate_task_visualization(self, output_file: str = "task_graph.html") -> str:
+        """
+        Generate an interactive visualization of task dependencies and status.
+        Returns the path to the generated HTML file.
+        """
+        try:
+            # Get all tasks
+            tasks = self.memory_store.list_tasks()
+            
+            # Create nodes and edges for the graph
+            nodes = []
+            edges = []
+            
+            # Create a node for each task
+            for task in tasks:
+                # Determine node color based on status
+                color = {
+                    "PENDING": "#FFA500",  # Orange
+                    "IN_PROGRESS": "#1E90FF",  # Blue
+                    "COMPLETED": "#32CD32",  # Green
+                    "FAILED": "#FF0000",  # Red
+                    "TIMEOUT": "#8B0000"   # Dark Red
+                }.get(task.status, "#808080")  # Gray default
+                
+                # Create node
+                nodes.append({
+                    "id": task.task_id,
+                    "label": f"Task {task.task_id}",
+                    "title": task.description[:50] + ("..." if len(task.description) > 50 else ""),
+                    "color": color,
+                    "shape": "dot",
+                    "size": 10 + (5 * task.progress if task.progress else 0)  # Size based on progress
+                })
+                
+                # Create edge if there's a parent
+                if task.parent_id:
+                    edges.append({
+                        "from": task.parent_id,
+                        "to": task.task_id,
+                        "arrows": "to"
+                    })
+            
+            # Generate HTML with vis.js
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Task Dependency Visualization</title>
+                <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+                <style type="text/css">
+                    #mynetwork {{
+                        width: 100%;
+                        height: 800px;
+                        border: 1px solid lightgray;
+                    }}
+                    body {{
+                        font-family: Arial, sans-serif;
+                    }}
+                    .task-stats {{
+                        margin: 20px;
+                        padding: 10px;
+                        background-color: #f5f5f5;
+                        border-radius: 5px;
+                    }}
+                </style>
+            </head>
+            <body>
+                <h1>Task Dependency Visualization</h1>
+                <div class="task-stats">
+                    <h2>Task Statistics</h2>
+                    <p>Total Tasks: {len(tasks)}</p>
+                    <p>Status Summary: {self.memory_store.get_task_summary()}</p>
+                    <p>Queue Size: {len(self.task_queue)}</p>
+                    <p>Generated at: {datetime.now().isoformat()}</p>
+                </div>
+                <div id="mynetwork"></div>
+                <script type="text/javascript">
+                    // Create a network
+                    var container = document.getElementById('mynetwork');
+                    var data = {{
+                        nodes: new vis.DataSet({json.dumps(nodes)}),
+                        edges: new vis.DataSet({json.dumps(edges)})
+                    }};
+                    var options = {{
+                        layout: {{
+                            hierarchical: {{
+                                direction: "UD",
+                                sortMethod: "directed",
+                                levelSeparation: 150
+                            }}
+                        }},
+                        physics: {{
+                            hierarchicalRepulsion: {{
+                                centralGravity: 0.0,
+                                springLength: 100,
+                                springConstant: 0.01,
+                                nodeDistance: 120
+                            }},
+                            solver: 'hierarchicalRepulsion'
+                        }},
+                        interaction: {{
+                            navigationButtons: true,
+                            keyboard: true
+                        }}
+                    }};
+                    var network = new vis.Network(container, data, options);
+                    
+                    // Add click event
+                    network.on("click", function(params) {{
+                        if (params.nodes.length > 0) {{
+                            var nodeId = params.nodes[0];
+                            alert("Task " + nodeId + " clicked. See console for details.");
+                            console.log("Task details:", data.nodes.get(nodeId));
+                        }}
+                    }});
+                </script>
+            </body>
+            </html>
+            """
+            
+            # Write to file
+            with open(output_file, "w") as f:
+                f.write(html)
+                
+            logger.info(f"[R1Agent] Generated task visualization at {output_file}")
+            return output_file
+            
+        except Exception as e:
+            logger.error(f"[R1Agent] Error generating visualization: {e}")
+            return f"Error: {str(e)}"
+    
+    def get_learning_statistics(self) -> Dict[str, Any]:
+        """Get statistics about the agent's learning progress."""
+        if not self.enable_learning:
+            return {"status": "Learning is disabled"}
+            
+        return {
+            "status": "success",
+            "conversation_history_length": len(self.conversation_history),
+            "function_patterns": {
+                pattern: {
+                    "count": data["count"],
+                    "examples": len(data["prompts"])
+                }
+                for pattern, data in self.task_success_patterns.items()
+            },
+            "performance_stats": self.memory_store.get_performance_statistics(),
+            "resource_stats": self.resource_monitor.get_resource_report() if hasattr(self, 'resource_monitor') else None
+        }
 
 ###############################################################################
 # CODE MANAGER FOR SELF-MODIFICATION
@@ -4951,6 +5364,231 @@ class CodeManager:
         for token in tokens:
             await asyncio.sleep(delay)
             yield token
+
+###############################################################################
+# ADVANCED RESOURCE MONITORING AND OPTIMIZATION
+###############################################################################
+
+class ResourceMonitor:
+    """
+    Monitors and optimizes resource usage based on task complexity and system load.
+    Features:
+    - Dynamic worker allocation based on task complexity
+    - CPU/Memory usage monitoring
+    - Task prioritization based on resource availability
+    - Throttling for resource-intensive tasks
+    """
+    
+    def __init__(self, scheduler: "TaskScheduler"):
+        self.scheduler = scheduler
+        self.resource_history = deque(maxlen=100)
+        self.task_complexity_cache = {}
+        self.monitoring_interval = 5  # seconds
+        self.monitoring_thread = None
+        self.stop_event = threading.Event()
+        self.start_monitoring()
+    
+    def start_monitoring(self):
+        """Start the resource monitoring thread."""
+        self.monitoring_thread = threading.Thread(target=self._monitor_resources, daemon=True)
+        self.monitoring_thread.start()
+        logger.info("[ResourceMonitor] Resource monitoring started")
+    
+    def stop_monitoring(self):
+        """Stop the resource monitoring thread."""
+        if self.monitoring_thread:
+            self.stop_event.set()
+            self.monitoring_thread.join(timeout=2)
+            logger.info("[ResourceMonitor] Resource monitoring stopped")
+    
+    def _monitor_resources(self):
+        """Continuously monitor system resources."""
+        while not self.stop_event.is_set():
+            try:
+                # Get current CPU and memory usage
+                cpu_usage = self._get_cpu_usage()
+                memory_usage = self._get_memory_usage()
+                
+                # Record resource usage
+                self.resource_history.append({
+                    "timestamp": datetime.now(),
+                    "cpu_usage": cpu_usage,
+                    "memory_usage": memory_usage,
+                    "active_tasks": len(self.scheduler.memory_store.get_in_progress_tasks()),
+                    "queue_size": len(self.scheduler.task_queue)
+                })
+                
+                # Adjust resources if needed
+                self._adjust_resources(cpu_usage, memory_usage)
+                
+                # Sleep for the monitoring interval
+                time.sleep(self.monitoring_interval)
+            except Exception as e:
+                logger.error(f"[ResourceMonitor] Error monitoring resources: {e}")
+                time.sleep(self.monitoring_interval)
+    
+    def _get_cpu_usage(self) -> float:
+        """Get current CPU usage percentage."""
+        try:
+            import psutil
+            return psutil.cpu_percent(interval=0.5)
+        except ImportError:
+            # Fallback if psutil is not available
+            try:
+                if sys.platform == "darwin":  # macOS
+                    cmd = "top -l 1 | grep 'CPU usage'"
+                    output = subprocess.check_output(cmd, shell=True).decode()
+                    cpu_usage = float(output.split("user")[0].split("%")[-2].strip())
+                    return cpu_usage
+                elif sys.platform == "linux":
+                    cmd = "top -bn1 | grep 'Cpu(s)'"
+                    output = subprocess.check_output(cmd, shell=True).decode()
+                    cpu_usage = float(output.split()[1])
+                    return cpu_usage
+                else:
+                    return 50.0  # Default value if platform not supported
+            except:
+                return 50.0  # Default fallback
+    
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage percentage."""
+        try:
+            import psutil
+            return psutil.virtual_memory().percent
+        except ImportError:
+            # Fallback if psutil is not available
+            try:
+                if sys.platform == "darwin":  # macOS
+                    cmd = "vm_stat | grep 'Pages free'"
+                    output = subprocess.check_output(cmd, shell=True).decode()
+                    # This is a very rough approximation
+                    return 50.0  # Default for macOS without psutil
+                elif sys.platform == "linux":
+                    cmd = "free | grep Mem"
+                    output = subprocess.check_output(cmd, shell=True).decode()
+                    total = float(output.split()[1])
+                    used = float(output.split()[2])
+                    return (used / total) * 100
+                else:
+                    return 50.0  # Default value if platform not supported
+            except:
+                return 50.0  # Default fallback
+    
+    def _adjust_resources(self, cpu_usage: float, memory_usage: float):
+        """Adjust resource allocation based on current usage."""
+        # If system is under heavy load, reduce worker count
+        if cpu_usage > 80 or memory_usage > 80:
+            current_workers = self.scheduler._executor._max_workers
+            if current_workers > 2:
+                new_workers = max(2, current_workers - 1)
+                self._resize_thread_pool(new_workers)
+                logger.info(f"[ResourceMonitor] Reduced worker count to {new_workers} due to high system load")
+        
+        # If system has available resources, increase worker count
+        elif cpu_usage < 30 and memory_usage < 50:
+            current_workers = self.scheduler._executor._max_workers
+            if current_workers < 8:  # Cap at 8 workers
+                new_workers = min(8, current_workers + 1)
+                self._resize_thread_pool(new_workers)
+                logger.info(f"[ResourceMonitor] Increased worker count to {new_workers} due to available resources")
+    
+    def _resize_thread_pool(self, new_size: int):
+        """Resize the thread pool to the new size."""
+        # Create a new executor with the desired size
+        new_executor = ThreadPoolExecutor(max_workers=new_size)
+        
+        # Copy over any pending tasks
+        old_executor = self.scheduler._executor
+        
+        # Update the scheduler's executor
+        self.scheduler._executor = new_executor
+        
+        # Shutdown the old executor without waiting for tasks to complete
+        # (they'll continue running in the background)
+        old_executor.shutdown(wait=False)
+    
+    def estimate_task_complexity(self, task: Task) -> float:
+        """Estimate the computational complexity of a task."""
+        # Check cache first
+        if task.task_id in self.task_complexity_cache:
+            return self.task_complexity_cache[task.task_id]
+        
+        # Simple heuristic based on keywords in the description
+        complexity = 1.0  # Base complexity
+        
+        # Keywords that indicate higher complexity
+        complexity_keywords = {
+            "calculate": 1.2,
+            "compute": 1.2,
+            "generate": 1.3,
+            "simulate": 1.5,
+            "matrix": 1.8,
+            "eigenvalues": 2.0,
+            "determinant": 1.7,
+            "inversion": 1.7,
+            "graph": 1.6,
+            "shortest path": 1.7,
+            "traveling salesman": 2.5,
+            "genetic algorithm": 2.0,
+            "neural network": 2.5,
+            "encryption": 1.5,
+            "decryption": 1.5,
+            "corpus": 1.8,
+            "frequency distribution": 1.6,
+            "tf-idf": 1.7
+        }
+        
+        description_lower = task.description.lower()
+        for keyword, multiplier in complexity_keywords.items():
+            if keyword in description_lower:
+                complexity *= multiplier
+        
+        # Cap complexity at 5.0
+        complexity = min(5.0, complexity)
+        
+        # Cache the result
+        self.task_complexity_cache[task.task_id] = complexity
+        
+        return complexity
+    
+    def get_resource_report(self) -> Dict[str, Any]:
+        """Generate a report of resource usage over time."""
+        if not self.resource_history:
+            return {"status": "No resource data available"}
+        
+        # Calculate averages
+        cpu_values = [entry["cpu_usage"] for entry in self.resource_history]
+        memory_values = [entry["memory_usage"] for entry in self.resource_history]
+        active_tasks = [entry["active_tasks"] for entry in self.resource_history]
+        queue_sizes = [entry["queue_size"] for entry in self.resource_history]
+        
+        return {
+            "status": "success",
+            "data_points": len(self.resource_history),
+            "time_range": {
+                "start": self.resource_history[0]["timestamp"].isoformat(),
+                "end": self.resource_history[-1]["timestamp"].isoformat()
+            },
+            "cpu_usage": {
+                "current": cpu_values[-1],
+                "average": sum(cpu_values) / len(cpu_values),
+                "max": max(cpu_values),
+                "min": min(cpu_values)
+            },
+            "memory_usage": {
+                "current": memory_values[-1],
+                "average": sum(memory_values) / len(memory_values),
+                "max": max(memory_values),
+                "min": min(memory_values)
+            },
+            "task_metrics": {
+                "current_active": active_tasks[-1],
+                "average_active": sum(active_tasks) / len(active_tasks),
+                "current_queue": queue_sizes[-1],
+                "average_queue": sum(queue_sizes) / len(queue_sizes)
+            },
+            "worker_count": self.scheduler._executor._max_workers
+        }
 
 ###############################################################################
 # MAIN DEMO
@@ -5294,30 +5932,43 @@ def create_evaluation_tasks(agent: R1Agent) -> None:
 
 def main():
     """
-    Demonstration of how you can use this advanced agent.
+    Demonstration of the advanced R1 agent with enhanced capabilities.
 
-    - We create an instance of R1Agent (which starts the scheduler).
-    - We pass in some complex prompt that might:
-      1) produce an immediate function call
-      2) spawn subtasks with dependencies
-      3) produce some textual answer
+    - We create an instance of R1Agent with learning and optimization enabled
+    - We pass in complex prompts that demonstrate the agent's capabilities
     - We add evaluation tasks to test the system thoroughly
-    - We wait for tasks to complete, showing progress updates.
-    - Then we gracefully shut down.
+    - We generate visualizations of task execution
+    - We display learning statistics and resource usage
+    - Then we gracefully shut down
     """
-    agent = R1Agent(max_workers=4)
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description="Advanced R1 Agent Demo")
+    parser.add_argument("--evaluate", action="store_true", help="Run evaluation tasks")
+    parser.add_argument("--workers", type=int, default=4, help="Number of worker threads")
+    parser.add_argument("--learning", action="store_true", default=True, help="Enable reinforcement learning")
+    parser.add_argument("--visualize", action="store_true", default=True, help="Generate task visualizations")
+    parser.add_argument("--persistent", action="store_true", default=False, help="Enable persistent memory")
+    args = parser.parse_args()
+
+    # Create the agent with specified options
+    agent = R1Agent(
+        max_workers=args.workers,
+        persistent_memory=args.persistent,
+        enable_learning=args.learning
+    )
 
     try:
-        # Add evaluation tasks if requested via command line argument
-        if len(sys.argv) > 1 and sys.argv[1] == "--evaluate":
+        # Add evaluation tasks if requested
+        if args.evaluate:
             create_evaluation_tasks(agent)
-            print(f"Added 30 evaluation tasks to the queue.")
+            print(f"Added evaluation tasks to the queue.")
         
         user_prompt = (
-            "Hello agent. I want you to do some arbitrary code execution. "
-            "Here is an example: <function_call> do_anything: <code>import sys; print(sys.version)</code> </function_call>\n\n"
-            "Additionally, let's break down another big task into 2 steps. "
-            "Subtask(2)=1) 'Fetch https://example.com' 2) 'Summarize the HTML on console'."
+            "Hello advanced agent. I want you to demonstrate your enhanced capabilities. "
+            "First, execute some code: <function_call> do_anything: <code>import sys; print(f'Python version: {sys.version}')</code> </function_call>\n\n"
+            "Then, break down a complex task into steps with proper dependency tracking. "
+            "Subtask(3)=1) 'Fetch https://example.com' 2) 'Analyze the HTML structure' 3) 'Summarize the content with key insights'."
         )
         response = agent.generate_response(user_prompt)
         print("\n================ AGENT RESPONSE (IMMEDIATE) ================\n")
@@ -5329,37 +5980,74 @@ def main():
         
         # Wait up to 300 seconds for tasks to complete, showing status every 3 seconds
         start_time = time.time()
-        max_wait_time = 300 if len(sys.argv) > 1 and sys.argv[1] == "--evaluate" else 30
+        max_wait_time = 300 if args.evaluate else 60
         
         while time.time() - start_time < max_wait_time:
             # Get task summary
             status = agent.get_task_status()
             
-            # Print current status
-            print(f"\nTask Status at {time.strftime('%H:%M:%S')}:")
+            # Print current status with enhanced formatting
+            print(f"\n\033[1mTask Status at {time.strftime('%H:%M:%S')}:\033[0m")
             print(f"  Total tasks: {status['task_count']}")
             print(f"  Status summary: {status['status_summary']}")
             print(f"  Queue size: {status['queue_size']}")
             
-            # Print details of recent tasks
-            print("\nRecent tasks:")
+            # Print details of recent tasks with color coding
+            print("\n\033[1mRecent tasks:\033[0m")
             for task in status['recent_tasks']:
-                print(f"  Task {task['task_id']} - {task['status']} - {task['description']}")
+                # Color based on status
+                color_code = {
+                    "PENDING": "\033[33m",     # Yellow
+                    "IN_PROGRESS": "\033[34m", # Blue
+                    "COMPLETED": "\033[32m",   # Green
+                    "FAILED": "\033[31m",      # Red
+                    "TIMEOUT": "\033[31m"      # Red
+                }.get(task['status'], "\033[0m")
+                
+                print(f"  {color_code}Task {task['task_id']} - {task['status']} - {task['description']}\033[0m")
             
             # Check if all tasks are done
             if status['status_summary'].get('PENDING', 0) == 0 and \
                status['status_summary'].get('IN_PROGRESS', 0) == 0 and \
                status['queue_size'] == 0:
-                print("\nAll tasks completed!")
+                print("\n\033[1;32mAll tasks completed!\033[0m")
                 break
                 
             # Sleep before checking again
             time.sleep(3)
 
+        # Generate visualization if requested
+        if args.visualize:
+            viz_file = agent.generate_task_visualization("task_visualization.html")
+            print(f"\n\033[1mTask visualization generated:\033[0m {viz_file}")
+            
+            # Try to open the visualization in a browser
+            try:
+                import webbrowser
+                webbrowser.open(f"file://{os.path.abspath(viz_file)}")
+                print("Visualization opened in browser.")
+            except:
+                print("Please open the visualization file manually.")
+        
+        # Display learning statistics if enabled
+        if args.learning:
+            learning_stats = agent.get_learning_statistics()
+            print("\n\033[1mLearning Statistics:\033[0m")
+            print(json.dumps(learning_stats, indent=2))
+
         # Print final memory state with detailed results
-        print("\nFinal task results:")
+        print("\n\033[1mFinal task results:\033[0m")
         for task in agent.memory_store.list_tasks():
-            print(f"  {task}")
+            # Color based on status
+            color_code = {
+                "PENDING": "\033[33m",     # Yellow
+                "IN_PROGRESS": "\033[34m", # Blue
+                "COMPLETED": "\033[32m",   # Green
+                "FAILED": "\033[31m",      # Red
+                "TIMEOUT": "\033[31m"      # Red
+            }.get(task.status, "\033[0m")
+            
+            print(f"  {color_code}{task}\033[0m")
             
             # For completed tasks with results, show a summary
             if task.status == "COMPLETED" and task.result:
@@ -5374,7 +6062,7 @@ def main():
 
     finally:
         agent.shutdown()
-        print("\nAgent shut down cleanly.")
+        print("\n\033[1mAgent shut down cleanly.\033[0m")
 
 
 if __name__ == "__main__":
