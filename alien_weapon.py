@@ -663,19 +663,47 @@ class TaskScheduler:
 
     def _dynamic_task_prioritization(self) -> None:
         """
-        Dynamically adjust task priorities based on system load and task characteristics.
+        Dynamically adjust task priorities based on system load, task characteristics, and dependencies.
         """
         with self.memory_store._lock:
             for task in self.memory_store.list_tasks():
                 if task.status == "PENDING":
-                    # Example logic: Increase priority for tasks with high impact
-                    if "high impact" in task.description.lower():
-                        task.priority = max(0, task.priority - 1)
-                        logger.info(f"[TaskScheduler] Increased priority for task {task.task_id} due to high impact.")
-                    # Advanced scheduling: Consider task dependencies and resource availability
+                    # Advanced logic: Use structured outputs to determine task impact
+                    impact_score = self._calculate_impact_score(task.description)
+                    task.priority = max(0, task.priority - impact_score)
+                    logger.info(f"[TaskScheduler] Adjusted priority for task {task.task_id} based on impact score {impact_score}.")
+
+                    # Consider task dependencies and resource availability
                     if self._has_unmet_dependencies(task):
                         task.priority += 1
                         logger.info(f"[TaskScheduler] Decreased priority for task {task.task_id} due to unmet dependencies.")
+
+    def _calculate_impact_score(self, description: str) -> int:
+        """
+        Calculate an impact score for a task based on its description using structured outputs.
+        """
+        # Example: Decompose the prompt to extract key impact factors
+        extracted_prompts = self._decompose_prompt(description)
+        impact_score = sum(1 for prompt in extracted_prompts if "high impact" in prompt.lower())
+        return impact_score
+
+    async def _decompose_prompt(self, prompt: str) -> List[str]:
+        """
+        Asynchronously decompose a prompt into multiple sub-prompts.
+        """
+        messages = [
+            {"role": "system", "content": "You will extract multiple prompts from a single prompt."},
+            {"role": "user", "content": prompt}
+        ]
+        class ExtractedPrompts(BaseModel):
+            prompts: List[str]
+        # Await the asynchronous parse to get an instance of ExtractedPrompts
+        result = await self.client.beta.chat.completions.parse(
+            messages=messages,
+            model="o3-mini",
+            reasoning_effort="high"
+        )
+        return result.prompts
 
     def _has_unmet_dependencies(self, task: Task) -> bool:
         """
