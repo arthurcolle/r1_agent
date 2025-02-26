@@ -372,7 +372,7 @@ class ActionGenerator:
         logger.info("[ActionGenerator] Generating candidate actions (max 25).")
         actions = []
 
-        # 1) Possibly reflect on tasks
+        # 1) Reflect on tasks and learn from past experiences
         pending_tasks = [t for t in tasks if t.status == "PENDING"]
         if pending_tasks:
             actions.append(CandidateAction(
@@ -380,7 +380,7 @@ class ActionGenerator:
                 rationale="We have tasks that are not yet started; let's see if we can refine them."
             ))
 
-        # 2) Possibly check code archive
+        # 2) Check code archive for potential improvements
         snippet_names = self.code_archive.list_snippets()
         if snippet_names:
             snippet_choice = snippet_names[0]
@@ -390,15 +390,14 @@ class ActionGenerator:
                 priority=3
             ))
 
-        # 3) Possibly do knowledge base lookups
-        # (In a real system, we'd parse conversation for queries and see if we have relevant facts.)
+        # 3) Perform knowledge base lookups for relevant information
         if self.kb.search_facts("agent"):
             actions.append(CandidateAction(
                 description="Retrieve facts about 'agent' from knowledge base",
                 rationale="We have some knowledge about the term 'agent' that might be relevant."
             ))
 
-        # 4) For each active goal, consider an action to break it down further.
+        # 4) Decompose active goals into smaller tasks
         for g in goals:
             if g.status == "ACTIVE":
                 actions.append(CandidateAction(
@@ -407,7 +406,16 @@ class ActionGenerator:
                     priority=g.priority
                 ))
 
-        # 5) Fill up to 25 with placeholders
+        # 5) Adjust goals dynamically based on new information
+        for g in goals:
+            if g.status == "ACTIVE" and self._should_adjust_goal(g):
+                actions.append(CandidateAction(
+                    description=f"Adjust goal '{g.name}' based on recent developments.",
+                    rationale="Adapting goals to new information ensures relevance and achievability.",
+                    priority=g.priority
+                ))
+
+        # 6) Fill up to 25 with placeholders
         while len(actions) < 25:
             i = len(actions) + 1
             actions.append(CandidateAction(
@@ -418,6 +426,13 @@ class ActionGenerator:
 
         # Return only first 25
         return actions[:25]
+
+    def _should_adjust_goal(self, goal: Goal) -> bool:
+        """
+        Determine if a goal should be adjusted based on new information.
+        """
+        # Placeholder logic for goal adjustment
+        return True  # In a real implementation, this would be more complex
 
 ###############################################################################
 # PRIORITY TASK QUEUE
