@@ -716,6 +716,32 @@ class TaskScheduler:
             logger.error(f"[TaskScheduler] Error in _decompose_prompt: {e}")
             return ["Error: prompt decomposition failed."]
 
+    async def _decompose_prompt(self, prompt: str) -> List[str]:
+        """
+        Asynchronously decompose a prompt into multiple sub-prompts.
+        """
+        messages = [
+            {"role": "system", "content": "You will extract multiple prompts from a single prompt."},
+            {"role": "user", "content": prompt}
+        ]
+
+        class ExtractedPrompts(BaseModel):
+            prompts: List[str]
+
+        try:
+            result = await self.client.beta.chat.completions.parse(
+                messages=messages,
+                model="o3-mini",
+                reasoning_effort="high"
+            )
+            if not hasattr(result, "prompts") or not result.prompts:
+                return ["No prompts extracted."]
+            processed_prompts = [p.strip().lower() for p in result.prompts if p.strip()]
+            return processed_prompts
+        except Exception as e:
+            logger.error(f"[TaskScheduler] Error in _decompose_prompt: {e}")
+            return ["Error: prompt decomposition failed."]
+
     def _has_unmet_dependencies(self, task: Task) -> bool:
         """
         Check if a task has unmet dependencies.
