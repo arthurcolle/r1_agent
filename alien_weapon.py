@@ -27,6 +27,7 @@ import threading
 import traceback
 import subprocess
 import requests
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from pydantic import BaseModel
@@ -571,7 +572,40 @@ class FunctionAdapter:
 
         return {"status": "success", "executed_code": code, "output": output}
 
-    def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
+    def execute_shell_command(self, command: str, long_running: bool = False) -> Dict[str, Any]:
+        """
+        Execute a shell command. If long_running is True, use nohup to run it in the background.
+        """
+        try:
+            if long_running:
+                command = f"nohup {command} &"
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            return {"status": "success", "output": result.stdout, "error": result.stderr}
+        except subprocess.TimeoutExpired:
+            return {"status": "timeout", "output": "", "error": "Command timed out"}
+        except Exception as e:
+            return {"status": "error", "output": "", "error": str(e)}
+
+    def execute_python_code(self, code: str, long_running: bool = False) -> Dict[str, Any]:
+        """
+        Execute Python code. If long_running is True, use threading to run it in the background.
+        """
+        import io, sys
+        old_stdout = sys.stdout
+        mystdout = io.StringIO()
+        sys.stdout = mystdout
+        try:
+            if long_running:
+                thread = threading.Thread(target=exec, args=(code,), kwargs={"globals": globals(), "locals": locals()})
+                thread.start()
+                return {"status": "success", "output": "Code is running in the background"}
+            else:
+                exec(code, globals(), locals())
+                return {"status": "success", "output": mystdout.getvalue()}
+        except Exception as e:
+            return {"status": "error", "output": "", "error": str(e)}
+        finally:
+            sys.stdout = old_stdout
         pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
         match = re.search(pattern, text, re.DOTALL)
         if not match:
@@ -611,7 +645,37 @@ class SmartTaskProcessor:
         if result:
             self.memory_store.update_task_result(task.task_id, result)
 
-        # 2) Check for subtask patterns: Subtask(n)= ...
+        # 2) Check for shell command execution
+        shell_command_pattern = r"<shell_command>(.*?)</shell_command>"
+        match = re.search(shell_command_pattern, task.description, re.DOTALL)
+        if match:
+            command = match.group(1).strip()
+            result = self.function_adapter.execute_shell_command(command, long_running=False)
+            self.memory_store.update_task_result(task.task_id, result)
+
+        # 3) Check for long-running shell command execution
+        long_shell_command_pattern = r"<long_shell_command>(.*?)</long_shell_command>"
+        match = re.search(long_shell_command_pattern, task.description, re.DOTALL)
+        if match:
+            command = match.group(1).strip()
+            result = self.function_adapter.execute_shell_command(command, long_running=True)
+            self.memory_store.update_task_result(task.task_id, result)
+
+        # 4) Check for Python code execution
+        python_code_pattern = r"<python_code>(.*?)</python_code>"
+        match = re.search(python_code_pattern, task.description, re.DOTALL)
+        if match:
+            code = match.group(1).strip()
+            result = self.function_adapter.execute_python_code(code, long_running=False)
+            self.memory_store.update_task_result(task.task_id, result)
+
+        # 5) Check for long-running Python code execution
+        long_python_code_pattern = r"<long_python_code>(.*?)</long_python_code>"
+        match = re.search(long_python_code_pattern, task.description, re.DOTALL)
+        if match:
+            code = match.group(1).strip()
+            result = self.function_adapter.execute_python_code(code, long_running=True)
+            self.memory_store.update_task_result(task.task_id, result)
         subtask_pattern = r"Subtask\s*\(\s*(\d+)\s*\)\s*=\s*(.*)"
         match = re.search(subtask_pattern, task.description, re.IGNORECASE | re.DOTALL)
         if match:
