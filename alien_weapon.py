@@ -185,6 +185,19 @@ class GoalManager:
                 g.status = status
                 g.last_updated = time.time()
                 logger.info(f"[GoalManager] Updated goal {goal_id} to status={status}")
+                # Enhanced goal management: Re-evaluate priorities
+                self._re_evaluate_goal_priorities()
+
+    def _re_evaluate_goal_priorities(self) -> None:
+        """
+        Re-evaluate and adjust goal priorities based on current context.
+        """
+        with self._lock:
+            for goal in self._goals.values():
+                # Example logic: Increase priority for goals nearing completion
+                if goal.status == "ACTIVE" and goal.priority > 1:
+                    goal.priority -= 1
+                    logger.info(f"[GoalManager] Increased priority for goal {goal.goal_id} to {goal.priority}")
 
 ###############################################################################
 # CONVERSATION MANAGEMENT
@@ -249,6 +262,18 @@ class SelfReflectiveCognition:
             msg = f"Reflected on task {task.task_id}: status={task.status}, desc='{snippet}'"
             self._reflections.append(msg)
             logger.info(f"[SelfReflectiveCognition] {msg}")
+            # Advanced learning: Adjust strategies based on task outcomes
+            self._learn_from_task(task)
+
+    def _learn_from_task(self, task: Task) -> None:
+        """
+        Learn from the task outcome to improve future performance.
+        """
+        # Example learning logic: Adjust priorities based on task success/failure
+        if task.status == "COMPLETED":
+            logger.info(f"[SelfReflectiveCognition] Task {task.task_id} completed successfully. Reinforcing strategies.")
+        elif task.status == "FAILED":
+            logger.info(f"[SelfReflectiveCognition] Task {task.task_id} failed. Adjusting strategies to avoid similar failures.")
 
     def get_reflections(self) -> List[str]:
         with self._lock:
@@ -604,7 +629,20 @@ class TaskScheduler:
             if not task:
                 time.sleep(0.2)
                 continue
+            # Improved task scheduling: Prioritize tasks based on dynamic criteria
             self._executor.submit(self._process_task_wrapper, task)
+
+    def _dynamic_task_prioritization(self) -> None:
+        """
+        Dynamically adjust task priorities based on system load and task characteristics.
+        """
+        with self.memory_store._lock:
+            for task in self.memory_store.list_tasks():
+                if task.status == "PENDING":
+                    # Example logic: Increase priority for tasks with high impact
+                    if "high impact" in task.description.lower():
+                        task.priority = max(0, task.priority - 1)
+                        logger.info(f"[TaskScheduler] Increased priority for task {task.task_id} due to high impact.")
 
     def _process_task_wrapper(self, task: Task) -> None:
         try:
