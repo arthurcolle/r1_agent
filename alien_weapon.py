@@ -198,6 +198,17 @@ class GoalManager:
                 if goal.status == "ACTIVE" and goal.priority > 1:
                     goal.priority -= 1
                     logger.info(f"[GoalManager] Increased priority for goal {goal.goal_id} to {goal.priority}")
+                # Advanced goal management: Adjust based on performance metrics
+                if goal.status == "ACTIVE" and self._should_adjust_goal_based_on_performance(goal):
+                    goal.priority = max(0, goal.priority - 1)
+                    logger.info(f"[GoalManager] Adjusted priority for goal {goal.goal_id} based on performance metrics.")
+
+    def _should_adjust_goal_based_on_performance(self, goal: Goal) -> bool:
+        """
+        Determine if a goal's priority should be adjusted based on performance metrics.
+        """
+        # Placeholder logic for performance-based adjustment
+        return True  # In a real implementation, this would be more complex
 
 ###############################################################################
 # CONVERSATION MANAGEMENT
@@ -272,8 +283,26 @@ class SelfReflectiveCognition:
         # Example learning logic: Adjust priorities based on task success/failure
         if task.status == "COMPLETED":
             logger.info(f"[SelfReflectiveCognition] Task {task.task_id} completed successfully. Reinforcing strategies.")
+            # Advanced adaptation: Increase priority for similar tasks
+            self._adjust_similar_task_priorities(task, increase=True)
         elif task.status == "FAILED":
             logger.info(f"[SelfReflectiveCognition] Task {task.task_id} failed. Adjusting strategies to avoid similar failures.")
+            # Advanced adaptation: Decrease priority for similar tasks
+            self._adjust_similar_task_priorities(task, increase=False)
+
+    def _adjust_similar_task_priorities(self, task: Task, increase: bool) -> None:
+        """
+        Adjust priorities of similar tasks based on the outcome of the current task.
+        """
+        with self._lock:
+            for t in self.memory_store.list_tasks():
+                if t.description == task.description and t.status == "PENDING":
+                    if increase:
+                        t.priority = max(0, t.priority - 1)
+                        logger.info(f"[SelfReflectiveCognition] Increased priority for similar task {t.task_id}.")
+                    else:
+                        t.priority += 1
+                        logger.info(f"[SelfReflectiveCognition] Decreased priority for similar task {t.task_id}.")
 
     def get_reflections(self) -> List[str]:
         with self._lock:
@@ -643,6 +672,17 @@ class TaskScheduler:
                     if "high impact" in task.description.lower():
                         task.priority = max(0, task.priority - 1)
                         logger.info(f"[TaskScheduler] Increased priority for task {task.task_id} due to high impact.")
+                    # Advanced scheduling: Consider task dependencies and resource availability
+                    if self._has_unmet_dependencies(task):
+                        task.priority += 1
+                        logger.info(f"[TaskScheduler] Decreased priority for task {task.task_id} due to unmet dependencies.")
+
+    def _has_unmet_dependencies(self, task: Task) -> bool:
+        """
+        Check if a task has unmet dependencies.
+        """
+        # Placeholder logic for checking dependencies
+        return False  # In a real implementation, this would be more complex
 
     def _process_task_wrapper(self, task: Task) -> None:
         try:
