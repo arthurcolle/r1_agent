@@ -4595,7 +4595,7 @@ class R1Agent:
             
             if result:
                 # Reload code after successful modification
-                await self.load_own_code()
+                self.load_own_code()
                 
                 task.complete({
                     "status": "success",
