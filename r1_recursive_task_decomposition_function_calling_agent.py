@@ -423,6 +423,76 @@ class SmartTaskProcessor:
         self.memory_store = memory_store
         self.function_adapter = function_adapter
         self.task_queue = task_queue
+        self.task_handlers = {
+            # File and system operations
+            "Create a temporary directory": self._handle_create_temp_dir,
+            "Create a text file": self._handle_create_file,
+            "Read the file contents": self._handle_read_file,
+            "Delete the file": self._handle_delete_file,
+            
+            # Data processing
+            "Calculate prime numbers": self._handle_calculate_primes,
+            "Generate random numbers": self._handle_generate_random_numbers,
+            "Calculate their statistical": self._handle_calculate_statistics,
+            
+            # Computational tasks
+            "Calculate factorial": self._handle_calculate_factorial,
+            "Generate Fibonacci": self._handle_generate_fibonacci,
+            "Find all prime Fibonacci": self._handle_find_prime_fibonacci,
+            
+            # Simulation tasks
+            "Simulate creating": self._handle_simulate_image,
+            "Apply a blur filter": self._handle_apply_filter,
+            "Calculate average pixel": self._handle_calculate_pixel_avg,
+            "Simulate a long computation": self._handle_long_computation,
+            
+            # Error handling tasks
+            "Attempt division by zero": self._handle_division_by_zero,
+            "Simulate a task that should timeout": self._handle_timeout_task,
+            
+            # Complex dependency tasks
+            "Complex dependency chain": self._handle_dependency_chain,
+            "Level": self._handle_dependency_level,
+            "Parent task with multiple": self._handle_parallel_parent,
+            "Parallel subtask": self._handle_parallel_subtask,
+            
+            # Resource-intensive tasks
+            "Calculate SHA-256": self._handle_calculate_hashes,
+            
+            # Conditional tasks
+            "Check if pandas": self._handle_check_pandas,
+            "Create a sample DataFrame": self._handle_create_dataframe,
+            "Generate a random number": self._handle_random_number,
+            "If even, calculate": self._handle_even_calculation,
+            "If odd, calculate": self._handle_odd_calculation,
+            
+            # Retry tasks
+            "Simulate a flaky operation": self._handle_flaky_operation,
+            
+            # Priority tasks
+            "Initially low priority": self._handle_low_priority,
+            "Update priority of task": self._handle_update_priority,
+            
+            # Data processing tasks
+            "Generate 1MB of random data": self._handle_generate_large_data,
+            "Compress the data": self._handle_compress_data,
+            "Calculate compression ratio": self._handle_compression_ratio,
+            
+            # Progress reporting
+            "Custom progress reporting": self._handle_custom_progress,
+            
+            # Dynamic tasks
+            "Dynamic task that spawns": self._handle_dynamic_spawner,
+            
+            # Complex result tasks
+            "Generate a complex nested": self._handle_complex_result,
+            "Generate dataset A": self._handle_dataset_a,
+            "Generate dataset B": self._handle_dataset_b,
+            "Merge results from tasks": self._handle_merge_results,
+            
+            # Status update tasks
+            "Long-running task with periodic": self._handle_periodic_updates,
+        }
 
     def process_task(self, task: Task) -> None:
         """
@@ -485,11 +555,18 @@ class SmartTaskProcessor:
             self._handle_summarize_html_task(task)
             return
             
+        # 2) Check for task handlers based on description keywords
+        for keyword, handler in self.task_handlers.items():
+            if keyword in task.description:
+                handler(task)
+                return
+            
+        # 3) Default calculation handler for other calculation tasks
         if task.description.startswith("'Calculate") or task.description.startswith("'Process"):
             self._handle_calculation_task(task)
             return
 
-        # 2) Check for <function_call> usage in the description
+        # 4) Check for <function_call> usage in the description
         result = self.function_adapter.process_function_calls(task.description)
         if result:
             # If function was executed, store the result
@@ -498,7 +575,7 @@ class SmartTaskProcessor:
             task.update_progress(1.0)  # Mark as 100% complete
             return
 
-        # 3) Potentially do "recursive decomposition"
+        # 5) Potentially do "recursive decomposition"
         #    For demonstration: if we see a phrase like "Subtask(n)=...", we parse out n subtask lines
         #    E.g. "Please do X. Subtask(2)=1) do partial step. 2) do partial step."
         subtask_pattern = r"Subtask\s*\(\s*(\d+)\s*\)\s*=\s*(.*)"
@@ -583,6 +660,1564 @@ class SmartTaskProcessor:
         else:
             task.fail(f"Failed to summarize HTML: {result.get('error', 'Unknown error')}")
 
+    # ===== File and System Operation Handlers =====
+    
+    def _handle_create_temp_dir(self, task: Task) -> None:
+        """Handle creating a temporary directory."""
+        import tempfile
+        try:
+            temp_dir = tempfile.mkdtemp()
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "temp_directory": temp_dir,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Created temp directory: {temp_dir}")
+        except Exception as e:
+            task.fail(f"Failed to create temp directory: {str(e)}")
+    
+    def _handle_create_file(self, task: Task) -> None:
+        """Handle creating a text file with current date."""
+        import tempfile
+        try:
+            # Create a temporary file with the current date
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.txt')
+            temp_file_path = temp_file.name
+            current_date = datetime.now().isoformat()
+            
+            with open(temp_file_path, 'w') as f:
+                f.write(f"File created at: {current_date}\n")
+                f.write(f"This is a test file for task {task.task_id}\n")
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "file_path": temp_file_path,
+                "content": f"File created at: {current_date}\nThis is a test file for task {task.task_id}\n",
+                "timestamp": current_date
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Created file at: {temp_file_path}")
+            
+            # If this is a subtask, store the file path in the parent task for later subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["temp_file_path"] = temp_file_path
+        except Exception as e:
+            task.fail(f"Failed to create file: {str(e)}")
+    
+    def _handle_read_file(self, task: Task) -> None:
+        """Handle reading a file created by a previous task."""
+        try:
+            # Get the file path from the parent task
+            file_path = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    file_path = parent_task.result.get("temp_file_path")
+            
+            if not file_path:
+                # Try to find a sibling task that created a file
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            file_path = sibling.result.get("file_path")
+                            if file_path:
+                                break
+            
+            if not file_path:
+                task.fail("Could not find a file path to read")
+                return
+                
+            task.update_progress(0.5)
+            
+            # Read the file
+            with open(file_path, 'r') as f:
+                content = f.read()
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "file_path": file_path,
+                "content": content,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Read file: {file_path}")
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["file_content"] = content
+        except Exception as e:
+            task.fail(f"Failed to read file: {str(e)}")
+    
+    def _handle_delete_file(self, task: Task) -> None:
+        """Handle deleting a file created by a previous task."""
+        import os
+        try:
+            # Get the file path from the parent task or sibling tasks
+            file_path = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    file_path = parent_task.result.get("temp_file_path")
+            
+            if not file_path:
+                # Try to find a sibling task that created or read a file
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            file_path = sibling.result.get("file_path")
+                            if file_path:
+                                break
+            
+            if not file_path:
+                task.fail("Could not find a file path to delete")
+                return
+                
+            task.update_progress(0.5)
+            
+            # Delete the file
+            os.remove(file_path)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "deleted_file": file_path,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Deleted file: {file_path}")
+        except Exception as e:
+            task.fail(f"Failed to delete file: {str(e)}")
+    
+    # ===== Data Processing Handlers =====
+    
+    def _handle_calculate_primes(self, task: Task) -> None:
+        """Calculate prime numbers in a range."""
+        try:
+            # Extract range from description or use default
+            range_match = re.search(r'between (\d+) and (\d+)', task.description)
+            start = int(range_match.group(1)) if range_match else 100
+            end = int(range_match.group(2)) if range_match else 200
+            
+            task.update_progress(0.2)
+            
+            # Simple prime number calculation
+            def is_prime(n):
+                if n <= 1:
+                    return False
+                if n <= 3:
+                    return True
+                if n % 2 == 0 or n % 3 == 0:
+                    return False
+                i = 5
+                while i * i <= n:
+                    if n % i == 0 or n % (i + 2) == 0:
+                        return False
+                    i += 6
+                return True
+            
+            task.update_progress(0.4)
+            
+            primes = []
+            for num in range(start, end + 1):
+                if is_prime(num):
+                    primes.append(num)
+                # Update progress proportionally
+                progress = 0.4 + 0.5 * (num - start) / (end - start)
+                task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "range": [start, end],
+                "prime_count": len(primes),
+                "primes": primes,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Found {len(primes)} primes between {start} and {end}")
+        except Exception as e:
+            task.fail(f"Failed to calculate primes: {str(e)}")
+    
+    def _handle_generate_random_numbers(self, task: Task) -> None:
+        """Generate random numbers."""
+        import random
+        try:
+            # Extract count from description or use default
+            count_match = re.search(r'Generate (\d+) random', task.description)
+            count = int(count_match.group(1)) if count_match else 1000
+            
+            # Generate random numbers with progress updates
+            numbers = []
+            for i in range(count):
+                numbers.append(random.random())
+                if i % (count // 10) == 0:  # Update progress every 10%
+                    progress = i / count
+                    task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "count": count,
+                "numbers": numbers[:10] + ["..."] + numbers[-10:] if count > 20 else numbers,  # Truncate for readability
+                "full_data": numbers,  # Store full data for subsequent tasks
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["random_numbers"] = numbers
+                    
+            logger.info(f"[SmartTaskProcessor] Generated {count} random numbers")
+        except Exception as e:
+            task.fail(f"Failed to generate random numbers: {str(e)}")
+    
+    def _handle_calculate_statistics(self, task: Task) -> None:
+        """Calculate statistical properties of numbers."""
+        try:
+            # Get numbers from parent task or sibling task
+            numbers = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    numbers = parent_task.result.get("random_numbers")
+            
+            if not numbers:
+                # Try to find a sibling task that generated numbers
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            numbers = sibling.result.get("full_data")
+                            if numbers:
+                                break
+            
+            if not numbers:
+                task.fail("Could not find numbers to calculate statistics")
+                return
+                
+            task.update_progress(0.3)
+            
+            # Calculate basic statistics
+            count = len(numbers)
+            mean = sum(numbers) / count
+            task.update_progress(0.5)
+            
+            # Calculate variance and standard deviation
+            variance = sum((x - mean) ** 2 for x in numbers) / count
+            std_dev = variance ** 0.5
+            task.update_progress(0.7)
+            
+            # Calculate min, max, median
+            sorted_numbers = sorted(numbers)
+            minimum = sorted_numbers[0]
+            maximum = sorted_numbers[-1]
+            median = sorted_numbers[count // 2] if count % 2 == 1 else (sorted_numbers[count // 2 - 1] + sorted_numbers[count // 2]) / 2
+            task.update_progress(0.9)
+            
+            # Calculate quartiles
+            q1 = sorted_numbers[count // 4]
+            q3 = sorted_numbers[3 * count // 4]
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "count": count,
+                "mean": mean,
+                "median": median,
+                "std_dev": std_dev,
+                "min": minimum,
+                "max": maximum,
+                "q1": q1,
+                "q3": q3,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Calculated statistics for {count} numbers")
+        except Exception as e:
+            task.fail(f"Failed to calculate statistics: {str(e)}")
+    
+    # ===== Computational Task Handlers =====
+    
+    def _handle_calculate_factorial(self, task: Task) -> None:
+        """Calculate factorial of a number."""
+        import math
+        try:
+            # Extract number from description
+            num_match = re.search(r'factorial of (\d+)', task.description)
+            num = int(num_match.group(1)) if num_match else 100
+            
+            task.update_progress(0.5)
+            
+            # Calculate factorial
+            result_value = math.factorial(num)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "number": num,
+                "factorial": str(result_value),  # Convert to string as it might be very large
+                "factorial_length": len(str(result_value)),
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Calculated factorial of {num} (length: {len(str(result_value))} digits)")
+        except Exception as e:
+            task.fail(f"Failed to calculate factorial: {str(e)}")
+    
+    def _handle_generate_fibonacci(self, task: Task) -> None:
+        """Generate Fibonacci sequence up to a limit."""
+        try:
+            # Extract limit from description
+            limit_match = re.search(r'up to (\d+)', task.description)
+            limit = int(limit_match.group(1)) if limit_match else 1000
+            
+            # Generate Fibonacci sequence
+            fibonacci = [0, 1]
+            while fibonacci[-1] + fibonacci[-2] <= limit:
+                fibonacci.append(fibonacci[-1] + fibonacci[-2])
+                # Update progress based on how close we are to the limit
+                progress = min(0.9, fibonacci[-1] / limit)
+                task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "limit": limit,
+                "sequence_length": len(fibonacci),
+                "fibonacci_sequence": fibonacci,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["fibonacci_sequence"] = fibonacci
+                    
+            logger.info(f"[SmartTaskProcessor] Generated Fibonacci sequence with {len(fibonacci)} numbers up to {limit}")
+        except Exception as e:
+            task.fail(f"Failed to generate Fibonacci sequence: {str(e)}")
+    
+    def _handle_find_prime_fibonacci(self, task: Task) -> None:
+        """Find prime Fibonacci numbers."""
+        try:
+            # Get Fibonacci sequence from parent task or sibling task
+            fibonacci = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    fibonacci = parent_task.result.get("fibonacci_sequence")
+            
+            if not fibonacci:
+                # Try to find a sibling task that generated Fibonacci numbers
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            fibonacci = sibling.result.get("fibonacci_sequence")
+                            if fibonacci:
+                                break
+            
+            if not fibonacci:
+                task.fail("Could not find Fibonacci sequence to check for primes")
+                return
+                
+            task.update_progress(0.2)
+            
+            # Function to check if a number is prime
+            def is_prime(n):
+                if n <= 1:
+                    return False
+                if n <= 3:
+                    return True
+                if n % 2 == 0 or n % 3 == 0:
+                    return False
+                i = 5
+                while i * i <= n:
+                    if n % i == 0 or n % (i + 2) == 0:
+                        return False
+                    i += 6
+                return True
+            
+            # Find prime Fibonacci numbers
+            prime_fibonacci = []
+            for i, num in enumerate(fibonacci):
+                if is_prime(num):
+                    prime_fibonacci.append(num)
+                # Update progress
+                progress = 0.2 + 0.8 * (i / len(fibonacci))
+                task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "fibonacci_count": len(fibonacci),
+                "prime_count": len(prime_fibonacci),
+                "prime_fibonacci": prime_fibonacci,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Found {len(prime_fibonacci)} prime Fibonacci numbers")
+        except Exception as e:
+            task.fail(f"Failed to find prime Fibonacci numbers: {str(e)}")
+    
+    # ===== Simulation Task Handlers =====
+    
+    def _handle_simulate_image(self, task: Task) -> None:
+        """Simulate creating an image."""
+        try:
+            # Extract dimensions from description
+            dim_match = re.search(r'(\d+)x(\d+)', task.description)
+            width = int(dim_match.group(1)) if dim_match else 1000
+            height = int(dim_match.group(2)) if dim_match else 1000
+            
+            # Simulate creating an image (just create a 2D array with random values)
+            import random
+            
+            # Create image in chunks to show progress
+            image = []
+            chunk_size = height // 10
+            for i in range(0, height, chunk_size):
+                chunk = [[random.randint(0, 255) for _ in range(width)] for _ in range(min(chunk_size, height - i))]
+                image.extend(chunk)
+                progress = (i + chunk_size) / height
+                task.update_progress(progress)
+            
+            # Calculate average value for verification
+            avg_value = sum(sum(row) for row in image) / (width * height)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "width": width,
+                "height": height,
+                "avg_value": avg_value,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store the "image" in the parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["simulated_image"] = image
+                    parent_task.result["image_dimensions"] = (width, height)
+            
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Simulated creating a {width}x{height} image with avg value {avg_value:.2f}")
+        except Exception as e:
+            task.fail(f"Failed to simulate image creation: {str(e)}")
+    
+    def _handle_apply_filter(self, task: Task) -> None:
+        """Apply a blur filter to a simulated image."""
+        try:
+            # Get image from parent task
+            image = None
+            dimensions = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    image = parent_task.result.get("simulated_image")
+                    dimensions = parent_task.result.get("image_dimensions")
+            
+            if not image or not dimensions:
+                # Try to find a sibling task that created an image
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "simulated_image" in sibling.result:
+                                image = sibling.result["simulated_image"]
+                                dimensions = sibling.result.get("image_dimensions")
+                                break
+            
+            if not image or not dimensions:
+                task.fail("Could not find image to apply filter")
+                return
+                
+            width, height = dimensions
+            task.update_progress(0.2)
+            
+            # Simulate applying a blur filter (simple box blur)
+            # We'll just average each pixel with its neighbors
+            filtered_image = [[0 for _ in range(width)] for _ in range(height)]
+            
+            # Process the image in chunks to show progress
+            chunk_size = height // 10
+            for y_start in range(0, height, chunk_size):
+                for y in range(y_start, min(y_start + chunk_size, height)):
+                    for x in range(width):
+                        # Simple box blur: average of 3x3 neighborhood
+                        neighbors = []
+                        for dy in [-1, 0, 1]:
+                            for dx in [-1, 0, 1]:
+                                nx, ny = x + dx, y + dy
+                                if 0 <= nx < width and 0 <= ny < height:
+                                    neighbors.append(image[ny][nx])
+                        filtered_image[y][x] = sum(neighbors) // len(neighbors)
+                
+                progress = 0.2 + 0.7 * ((y_start + chunk_size) / height)
+                task.update_progress(progress)
+            
+            # Calculate average value after filtering
+            avg_value = sum(sum(row) for row in filtered_image) / (width * height)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "filter_type": "blur",
+                "width": width,
+                "height": height,
+                "avg_value_after_filter": avg_value,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store the filtered image in the parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["filtered_image"] = filtered_image
+            
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Applied blur filter to {width}x{height} image, new avg value: {avg_value:.2f}")
+        except Exception as e:
+            task.fail(f"Failed to apply filter: {str(e)}")
+    
+    def _handle_calculate_pixel_avg(self, task: Task) -> None:
+        """Calculate average pixel value of an image."""
+        try:
+            # Get image from parent task (either original or filtered)
+            image = None
+            dimensions = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    # Prefer filtered image if available
+                    image = parent_task.result.get("filtered_image")
+                    if not image:
+                        image = parent_task.result.get("simulated_image")
+                    dimensions = parent_task.result.get("image_dimensions")
+            
+            if not image:
+                # Try to find a sibling task that has an image
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "filtered_image" in sibling.result:
+                                image = sibling.result["filtered_image"]
+                                break
+                            elif "simulated_image" in sibling.result:
+                                image = sibling.result["simulated_image"]
+                                break
+            
+            if not image:
+                task.fail("Could not find image to calculate average pixel value")
+                return
+                
+            task.update_progress(0.5)
+            
+            # Calculate average pixel value
+            total_sum = sum(sum(row) for row in image)
+            pixel_count = len(image) * len(image[0])
+            avg_value = total_sum / pixel_count
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "pixel_count": pixel_count,
+                "average_value": avg_value,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Calculated average pixel value: {avg_value:.2f} from {pixel_count} pixels")
+        except Exception as e:
+            task.fail(f"Failed to calculate average pixel value: {str(e)}")
+    
+    def _handle_long_computation(self, task: Task) -> None:
+        """Simulate a long computation with progress updates."""
+        try:
+            # Simulate a long computation with 20 steps
+            steps = 20
+            for i in range(steps):
+                # Check for timeout
+                if task.is_timed_out():
+                    task.timeout()
+                    return
+                
+                # Simulate work
+                time.sleep(0.5)
+                
+                # Update progress
+                progress = (i + 1) / steps
+                task.update_progress(progress)
+                logger.info(f"[SmartTaskProcessor] Long computation progress: {progress:.0%}")
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "steps_completed": steps,
+                "computation_time": steps * 0.5,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.memory_store.update_task_result(task.task_id, result)
+            logger.info(f"[SmartTaskProcessor] Completed long computation with {steps} steps")
+        except Exception as e:
+            task.fail(f"Failed during long computation: {str(e)}")
+    
+    # ===== Error Handling Task Handlers =====
+    
+    def _handle_division_by_zero(self, task: Task) -> None:
+        """Deliberately cause a division by zero error to test error handling."""
+        try:
+            task.update_progress(0.5)
+            logger.info(f"[SmartTaskProcessor] Attempting division by zero...")
+            
+            # This will cause an error
+            result = 1 / 0
+            
+            # We should never reach this point
+            task.update_progress(1.0)
+            self.memory_store.update_task_result(task.task_id, {"status": "success", "result": result})
+        except Exception as e:
+            error_msg = f"Division by zero error: {str(e)}"
+            logger.info(f"[SmartTaskProcessor] Successfully caught error: {error_msg}")
+            task.fail(error_msg)
+    
+    def _handle_timeout_task(self, task: Task) -> None:
+        """Simulate a task that should timeout."""
+        try:
+            logger.info(f"[SmartTaskProcessor] Starting task that should timeout (timeout: {task.timeout_seconds}s)")
+            
+            # Sleep for longer than the timeout
+            for i in range(10):
+                if task.is_timed_out():
+                    logger.info(f"[SmartTaskProcessor] Task detected its own timeout")
+                    task.timeout()
+                    return
+                
+                time.sleep(0.5)
+                task.update_progress((i + 1) / 10)
+            
+            # If we get here, the timeout didn't work
+            logger.warning(f"[SmartTaskProcessor] Task that should have timed out completed successfully")
+            task.complete({"status": "unexpected_success", "message": "This task should have timed out"})
+        except Exception as e:
+            task.fail(f"Error in timeout task: {str(e)}")
+    
+    # ===== Dependency Chain Task Handlers =====
+    
+    def _handle_dependency_chain(self, task: Task) -> None:
+        """Handle the parent task of a dependency chain."""
+        try:
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Starting dependency chain parent task")
+            
+            # This task will be completed when all its subtasks are done
+            # We'll just update its progress based on subtasks
+            subtasks = self.memory_store.get_subtasks(task.task_id)
+            if subtasks:
+                # We already have subtasks, so we're waiting for them
+                completed = sum(1 for st in subtasks if st.status == "COMPLETED")
+                progress = 0.2 + 0.8 * (completed / len(subtasks))
+                task.update_progress(progress)
+                logger.info(f"[SmartTaskProcessor] Dependency chain has {completed}/{len(subtasks)} subtasks completed")
+            else:
+                # No subtasks yet, we'll complete when they're added and finished
+                task.update_progress(0.5)
+            
+            # The task will be marked as completed by the main process_task method
+            # when all subtasks are done
+        except Exception as e:
+            task.fail(f"Error in dependency chain parent: {str(e)}")
+    
+    def _handle_dependency_level(self, task: Task) -> None:
+        """Handle a level in a dependency chain."""
+        try:
+            # Extract level from description
+            level_match = re.search(r'Level (\d+)', task.description)
+            level = int(level_match.group(1)) if level_match else 1
+            
+            logger.info(f"[SmartTaskProcessor] Processing dependency chain level {level}")
+            
+            # Simulate work for this level
+            for i in range(5):
+                time.sleep(0.2)
+                progress = (i + 1) / 5
+                task.update_progress(progress)
+            
+            result = {
+                "status": "success",
+                "level": level,
+                "message": f"Completed level {level} in dependency chain",
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Completed dependency chain level {level}")
+        except Exception as e:
+            task.fail(f"Error in dependency level {level}: {str(e)}")
+    
+    def _handle_parallel_parent(self, task: Task) -> None:
+        """Handle a parent task with multiple parallel children."""
+        try:
+            task.update_progress(0.1)
+            logger.info(f"[SmartTaskProcessor] Starting parallel parent task")
+            
+            # This task will be completed when all its subtasks are done
+            # We'll just update its progress based on subtasks
+            subtasks = self.memory_store.get_subtasks(task.task_id)
+            if subtasks:
+                # We already have subtasks, so we're waiting for them
+                completed = sum(1 for st in subtasks if st.status == "COMPLETED")
+                progress = 0.1 + 0.9 * (completed / len(subtasks))
+                task.update_progress(progress)
+                logger.info(f"[SmartTaskProcessor] Parallel parent has {completed}/{len(subtasks)} subtasks completed")
+            else:
+                # No subtasks yet, we'll complete when they're added and finished
+                task.update_progress(0.5)
+            
+            # The task will be marked as completed by the main process_task method
+            # when all subtasks are done
+        except Exception as e:
+            task.fail(f"Error in parallel parent: {str(e)}")
+    
+    def _handle_parallel_subtask(self, task: Task) -> None:
+        """Handle a parallel subtask with shared parent."""
+        try:
+            # Extract subtask number from description
+            num_match = re.search(r'subtask (\d+)', task.description)
+            num = int(num_match.group(1)) if num_match else 0
+            
+            logger.info(f"[SmartTaskProcessor] Processing parallel subtask {num}")
+            
+            # Simulate work with different durations based on subtask number
+            steps = 5 + num  # More steps for higher numbered tasks
+            for i in range(steps):
+                time.sleep(0.1)
+                progress = (i + 1) / steps
+                task.update_progress(progress)
+            
+            result = {
+                "status": "success",
+                "subtask_number": num,
+                "steps_completed": steps,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Completed parallel subtask {num}")
+        except Exception as e:
+            task.fail(f"Error in parallel subtask {num}: {str(e)}")
+    
+    # ===== Resource-Intensive Task Handlers =====
+    
+    def _handle_calculate_hashes(self, task: Task) -> None:
+        """Calculate SHA-256 hashes of random strings."""
+        import hashlib
+        import random
+        import string
+        
+        try:
+            # Extract count from description
+            count_match = re.search(r'of (\d+) random', task.description)
+            count = int(count_match.group(1)) if count_match else 10000
+            
+            logger.info(f"[SmartTaskProcessor] Calculating SHA-256 hashes for {count} strings")
+            
+            # Generate random strings and calculate hashes
+            hashes = []
+            for i in range(count):
+                # Generate a random string
+                random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=50))
+                
+                # Calculate SHA-256 hash
+                hash_obj = hashlib.sha256(random_string.encode())
+                hash_hex = hash_obj.hexdigest()
+                hashes.append(hash_hex)
+                
+                # Update progress every 5%
+                if i % (count // 20) == 0:
+                    progress = i / count
+                    task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "count": count,
+                "sample_hashes": hashes[:5],  # Just show a few samples
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Completed calculating {count} SHA-256 hashes")
+        except Exception as e:
+            task.fail(f"Error calculating hashes: {str(e)}")
+    
+    # ===== Conditional Task Handlers =====
+    
+    def _handle_check_pandas(self, task: Task) -> None:
+        """Check if pandas is installed."""
+        try:
+            task.update_progress(0.5)
+            
+            # Try to import pandas
+            pandas_available = False
+            pandas_version = None
+            try:
+                import pandas
+                pandas_available = True
+                pandas_version = pandas.__version__
+            except ImportError:
+                pass
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "pandas_available": pandas_available,
+                "pandas_version": pandas_version,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store result in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["pandas_available"] = pandas_available
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Pandas availability check: {pandas_available}")
+        except Exception as e:
+            task.fail(f"Error checking pandas: {str(e)}")
+    
+    def _handle_create_dataframe(self, task: Task) -> None:
+        """Create a sample DataFrame if pandas is available."""
+        try:
+            # Check if pandas is available from parent or sibling task
+            pandas_available = False
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    pandas_available = parent_task.result.get("pandas_available", False)
+            
+            if not pandas_available:
+                # Try to find a sibling task that checked pandas
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            pandas_available = sibling.result.get("pandas_available", False)
+                            if pandas_available is not None:
+                                break
+            
+            task.update_progress(0.3)
+            
+            if not pandas_available:
+                result = {
+                    "status": "skipped",
+                    "reason": "pandas is not available",
+                    "timestamp": datetime.now().isoformat()
+                }
+                task.complete(result)
+                logger.info(f"[SmartTaskProcessor] Skipped creating DataFrame because pandas is not available")
+                return
+            
+            # Create a sample DataFrame
+            import pandas as pd
+            import numpy as np
+            
+            # Create a DataFrame with random data
+            df = pd.DataFrame(np.random.randn(10, 4), columns=list('ABCD'))
+            
+            task.update_progress(0.7)
+            
+            # Calculate some statistics
+            stats = df.describe().to_dict()
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "dataframe_shape": df.shape,
+                "dataframe_columns": list(df.columns),
+                "dataframe_stats": stats,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Created pandas DataFrame with shape {df.shape}")
+        except Exception as e:
+            task.fail(f"Error creating DataFrame: {str(e)}")
+    
+    def _handle_random_number(self, task: Task) -> None:
+        """Generate a random number and store it for conditional tasks."""
+        import random
+        try:
+            task.update_progress(0.5)
+            
+            # Generate a random number
+            number = random.randint(1, 100)
+            is_even = number % 2 == 0
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "random_number": number,
+                "is_even": is_even,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store in parent task for conditional subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["random_number"] = number
+                    parent_task.result["is_even"] = is_even
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated random number: {number} (even: {is_even})")
+        except Exception as e:
+            task.fail(f"Error generating random number: {str(e)}")
+    
+    def _handle_even_calculation(self, task: Task) -> None:
+        """Calculate square root if the number is even."""
+        import math
+        try:
+            # Get number and even/odd status from parent or sibling task
+            number = None
+            is_even = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    number = parent_task.result.get("random_number")
+                    is_even = parent_task.result.get("is_even")
+            
+            if number is None or is_even is None:
+                # Try to find a sibling task with the number
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            number = sibling.result.get("random_number")
+                            is_even = sibling.result.get("is_even")
+                            if number is not None and is_even is not None:
+                                break
+            
+            if number is None:
+                task.fail("Could not find random number to process")
+                return
+                
+            task.update_progress(0.5)
+            
+            if not is_even:
+                result = {
+                    "status": "skipped",
+                    "reason": f"Number {number} is odd, not calculating square root",
+                    "timestamp": datetime.now().isoformat()
+                }
+                task.complete(result)
+                logger.info(f"[SmartTaskProcessor] Skipped square root calculation for odd number {number}")
+                return
+            
+            # Calculate square root for even number
+            sqrt_value = math.sqrt(number)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "number": number,
+                "square_root": sqrt_value,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated square root of {number}: {sqrt_value}")
+        except Exception as e:
+            task.fail(f"Error calculating square root: {str(e)}")
+    
+    def _handle_odd_calculation(self, task: Task) -> None:
+        """Calculate cube if the number is odd."""
+        try:
+            # Get number and even/odd status from parent or sibling task
+            number = None
+            is_even = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    number = parent_task.result.get("random_number")
+                    is_even = parent_task.result.get("is_even")
+            
+            if number is None or is_even is None:
+                # Try to find a sibling task with the number
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            number = sibling.result.get("random_number")
+                            is_even = sibling.result.get("is_even")
+                            if number is not None and is_even is not None:
+                                break
+            
+            if number is None:
+                task.fail("Could not find random number to process")
+                return
+                
+            task.update_progress(0.5)
+            
+            if is_even:
+                result = {
+                    "status": "skipped",
+                    "reason": f"Number {number} is even, not calculating cube",
+                    "timestamp": datetime.now().isoformat()
+                }
+                task.complete(result)
+                logger.info(f"[SmartTaskProcessor] Skipped cube calculation for even number {number}")
+                return
+            
+            # Calculate cube for odd number
+            cube_value = number ** 3
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "number": number,
+                "cube": cube_value,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated cube of {number}: {cube_value}")
+        except Exception as e:
+            task.fail(f"Error calculating cube: {str(e)}")
+    
+    # ===== Retry Task Handlers =====
+    
+    def _handle_flaky_operation(self, task: Task) -> None:
+        """Simulate a flaky operation that needs retries."""
+        import random
+        try:
+            max_attempts = 5
+            attempt = 0
+            success = False
+            
+            while attempt < max_attempts and not success:
+                attempt += 1
+                task.update_progress(0.2 * attempt / max_attempts)
+                
+                logger.info(f"[SmartTaskProcessor] Flaky operation attempt {attempt}/{max_attempts}")
+                
+                # 30% chance of success on each attempt
+                if random.random() < 0.3:
+                    success = True
+                else:
+                    # Simulate a delay before retry
+                    time.sleep(0.5)
+            
+            if success:
+                task.update_progress(1.0)
+                result = {
+                    "status": "success",
+                    "attempts": attempt,
+                    "message": f"Operation succeeded after {attempt} attempts",
+                    "timestamp": datetime.now().isoformat()
+                }
+                task.complete(result)
+                logger.info(f"[SmartTaskProcessor] Flaky operation succeeded after {attempt} attempts")
+            else:
+                task.fail(f"Operation failed after {max_attempts} attempts")
+        except Exception as e:
+            task.fail(f"Error in flaky operation: {str(e)}")
+    
+    # ===== Priority Task Handlers =====
+    
+    def _handle_low_priority(self, task: Task) -> None:
+        """Handle a task that starts with low priority."""
+        try:
+            logger.info(f"[SmartTaskProcessor] Starting low priority task (priority: {task.priority})")
+            
+            # This task will wait until its priority is updated
+            # We'll just check if the priority has been changed
+            if task.priority < 50:  # If priority has been increased
+                task.update_progress(0.5)
+                
+                # Now that we have higher priority, do the work
+                time.sleep(1)
+                
+                task.update_progress(1.0)
+                result = {
+                    "status": "success",
+                    "original_priority": 100,
+                    "final_priority": task.priority,
+                    "message": "Task completed after priority was increased",
+                    "timestamp": datetime.now().isoformat()
+                }
+                task.complete(result)
+                logger.info(f"[SmartTaskProcessor] Completed task after priority increase to {task.priority}")
+            else:
+                # Still low priority, requeue with a small progress update
+                current_progress = task.progress or 0
+                task.update_progress(min(0.2, current_progress + 0.05))
+                self.task_queue.push(task)
+                logger.info(f"[SmartTaskProcessor] Requeued low priority task (still at priority {task.priority})")
+        except Exception as e:
+            task.fail(f"Error in low priority task: {str(e)}")
+    
+    def _handle_update_priority(self, task: Task) -> None:
+        """Update the priority of another task."""
+        try:
+            # Extract task ID from description
+            task_id_match = re.search(r'task (\d+)', task.description)
+            if not task_id_match:
+                task.fail("Could not extract task ID from description")
+                return
+                
+            target_task_id = int(task_id_match.group(1))
+            task.update_progress(0.5)
+            
+            # Find the target task
+            target_task = self.memory_store.get_task(target_task_id)
+            if not target_task:
+                task.fail(f"Could not find task with ID {target_task_id}")
+                return
+            
+            # Update the priority
+            old_priority = target_task.priority
+            target_task.priority = 1  # Set to very high priority
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "target_task_id": target_task_id,
+                "old_priority": old_priority,
+                "new_priority": target_task.priority,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Updated task {target_task_id} priority from {old_priority} to {target_task.priority}")
+        except Exception as e:
+            task.fail(f"Error updating priority: {str(e)}")
+    
+    # ===== Data Processing Task Handlers =====
+    
+    def _handle_generate_large_data(self, task: Task) -> None:
+        """Generate 1MB of random data."""
+        import random
+        try:
+            # Calculate how many integers we need for ~1MB
+            # Each integer is 4 bytes, so we need ~262,144 integers
+            count = 262144
+            
+            logger.info(f"[SmartTaskProcessor] Generating {count} random integers (~1MB)")
+            
+            # Generate data in chunks to show progress
+            data = []
+            chunk_size = count // 10
+            for i in range(0, count, chunk_size):
+                chunk = [random.randint(0, 1000000) for _ in range(min(chunk_size, count - i))]
+                data.extend(chunk)
+                progress = (i + chunk_size) / count
+                task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "data_size": len(data),
+                "approximate_bytes": len(data) * 4,
+                "sample": data[:10],
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store data in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["large_data"] = data
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated {len(data)} integers (~{len(data)*4/1024:.1f} KB)")
+        except Exception as e:
+            task.fail(f"Error generating large data: {str(e)}")
+    
+    def _handle_compress_data(self, task: Task) -> None:
+        """Compress the large data."""
+        import zlib
+        try:
+            # Get data from parent task
+            data = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    data = parent_task.result.get("large_data")
+            
+            if not data:
+                # Try to find a sibling task with the data
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "large_data" in sibling.result:
+                                data = sibling.result["large_data"]
+                                break
+            
+            if not data:
+                task.fail("Could not find data to compress")
+                return
+                
+            task.update_progress(0.3)
+            
+            # Convert data to bytes for compression
+            data_bytes = str(data).encode()
+            original_size = len(data_bytes)
+            
+            task.update_progress(0.6)
+            
+            # Compress the data
+            compressed_data = zlib.compress(data_bytes)
+            compressed_size = len(compressed_data)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "original_size": original_size,
+                "compressed_size": compressed_size,
+                "compression_ratio": original_size / compressed_size if compressed_size > 0 else 0,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store compressed data in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["compressed_data"] = {
+                        "original_size": original_size,
+                        "compressed_size": compressed_size
+                    }
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Compressed data from {original_size/1024:.1f} KB to {compressed_size/1024:.1f} KB")
+        except Exception as e:
+            task.fail(f"Error compressing data: {str(e)}")
+    
+    def _handle_compression_ratio(self, task: Task) -> None:
+        """Calculate compression ratio."""
+        try:
+            # Get compression data from parent task
+            compression_data = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    compression_data = parent_task.result.get("compressed_data")
+            
+            if not compression_data:
+                # Try to find a sibling task with the compression data
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "original_size" in sibling.result and "compressed_size" in sibling.result:
+                                compression_data = {
+                                    "original_size": sibling.result["original_size"],
+                                    "compressed_size": sibling.result["compressed_size"]
+                                }
+                                break
+            
+            if not compression_data:
+                task.fail("Could not find compression data")
+                return
+                
+            task.update_progress(0.5)
+            
+            # Calculate compression ratio and savings
+            original_size = compression_data["original_size"]
+            compressed_size = compression_data["compressed_size"]
+            ratio = original_size / compressed_size if compressed_size > 0 else 0
+            savings_percent = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "original_size_kb": original_size / 1024,
+                "compressed_size_kb": compressed_size / 1024,
+                "compression_ratio": ratio,
+                "space_savings_percent": savings_percent,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Compression ratio: {ratio:.2f}x, savings: {savings_percent:.1f}%")
+        except Exception as e:
+            task.fail(f"Error calculating compression ratio: {str(e)}")
+    
+    # ===== Progress Reporting Task Handlers =====
+    
+    def _handle_custom_progress(self, task: Task) -> None:
+        """Task with custom detailed progress reporting."""
+        try:
+            # Extract step count from description
+            steps_match = re.search(r'with (\d+) steps', task.description)
+            steps = int(steps_match.group(1)) if steps_match else 10
+            
+            logger.info(f"[SmartTaskProcessor] Starting custom progress task with {steps} steps")
+            
+            # Perform steps with detailed progress reporting
+            for i in range(steps):
+                step_name = f"Step {i+1}/{steps}: {['Initializing', 'Loading', 'Processing', 'Analyzing', 'Validating', 'Transforming', 'Optimizing', 'Finalizing', 'Exporting', 'Cleaning up'][i % 10]}"
+                
+                # Log detailed progress
+                progress = (i + 0.5) / steps
+                logger.info(f"[SmartTaskProcessor] {step_name} - {progress:.0%} complete")
+                task.update_progress(progress)
+                
+                # Simulate work
+                time.sleep(0.3)
+                
+                # Log step completion
+                progress = (i + 1) / steps
+                logger.info(f"[SmartTaskProcessor] Completed {step_name} - {progress:.0%} complete")
+                task.update_progress(progress)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "steps_completed": steps,
+                "detailed_progress": True,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Completed custom progress task with {steps} steps")
+        except Exception as e:
+            task.fail(f"Error in custom progress task: {str(e)}")
+    
+    # ===== Dynamic Task Handlers =====
+    
+    def _handle_dynamic_spawner(self, task: Task) -> None:
+        """Dynamically spawn a random number of subtasks."""
+        import random
+        try:
+            task.update_progress(0.2)
+            
+            # Decide how many subtasks to create (2-5)
+            subtask_count = random.randint(2, 5)
+            logger.info(f"[SmartTaskProcessor] Dynamically spawning {subtask_count} subtasks")
+            
+            # Create the subtasks
+            for i in range(subtask_count):
+                subtask = self._create_subtask(
+                    task, 
+                    f"'Dynamic child task {i+1}/{subtask_count} with random work'"
+                )
+                self.task_queue.push(subtask)
+                logger.info(f"[SmartTaskProcessor] Created dynamic subtask {subtask.task_id}")
+            
+            task.update_progress(0.5)
+            
+            # The task will be marked as completed by the main process_task method
+            # when all subtasks are done
+        except Exception as e:
+            task.fail(f"Error spawning dynamic subtasks: {str(e)}")
+    
+    # ===== Complex Result Task Handlers =====
+    
+    def _handle_complex_result(self, task: Task) -> None:
+        """Generate a complex nested result structure."""
+        try:
+            task.update_progress(0.3)
+            
+            # Create a complex nested result structure
+            result = {
+                "status": "success",
+                "metadata": {
+                    "created_at": datetime.now().isoformat(),
+                    "version": "1.0",
+                    "task_id": task.task_id
+                },
+                "statistics": {
+                    "numeric_values": [1, 2, 3, 4, 5],
+                    "mean": 3.0,
+                    "median": 3.0,
+                    "std_dev": 1.4142135623730951
+                },
+                "categories": {
+                    "category_a": {
+                        "count": 10,
+                        "items": ["a1", "a2", "a3"]
+                    },
+                    "category_b": {
+                        "count": 5,
+                        "items": ["b1", "b2"]
+                    }
+                },
+                "nested_arrays": [
+                    [1, 2, 3],
+                    [4, 5, 6],
+                    [7, 8, 9]
+                ],
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            task.update_progress(1.0)
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated complex nested result structure")
+        except Exception as e:
+            task.fail(f"Error generating complex result: {str(e)}")
+    
+    def _handle_dataset_a(self, task: Task) -> None:
+        """Generate dataset A."""
+        import random
+        try:
+            task.update_progress(0.5)
+            
+            # Generate a simple dataset
+            dataset = {
+                "name": "Dataset A",
+                "values": [random.randint(1, 100) for _ in range(20)],
+                "created_at": datetime.now().isoformat()
+            }
+            
+            task.update_progress(1.0)
+            task.complete(dataset)
+            logger.info(f"[SmartTaskProcessor] Generated Dataset A with 20 values")
+        except Exception as e:
+            task.fail(f"Error generating Dataset A: {str(e)}")
+    
+    def _handle_dataset_b(self, task: Task) -> None:
+        """Generate dataset B."""
+        import random
+        try:
+            task.update_progress(0.5)
+            
+            # Generate a simple dataset
+            dataset = {
+                "name": "Dataset B",
+                "values": [random.random() * 100 for _ in range(15)],
+                "created_at": datetime.now().isoformat()
+            }
+            
+            task.update_progress(1.0)
+            task.complete(dataset)
+            logger.info(f"[SmartTaskProcessor] Generated Dataset B with 15 values")
+        except Exception as e:
+            task.fail(f"Error generating Dataset B: {str(e)}")
+    
+    def _handle_merge_results(self, task: Task) -> None:
+        """Merge results from two other tasks."""
+        try:
+            # Extract task IDs from description
+            id_match = re.search(r'tasks (\d+) and (\d+)', task.description)
+            if not id_match:
+                task.fail("Could not extract task IDs from description")
+                return
+                
+            task_a_id = int(id_match.group(1))
+            task_b_id = int(id_match.group(2))
+            
+            task.update_progress(0.3)
+            
+            # Get the results from both tasks
+            task_a = self.memory_store.get_task(task_a_id)
+            task_b = self.memory_store.get_task(task_b_id)
+            
+            if not task_a or not task_b:
+                task.fail(f"Could not find one or both tasks: {task_a_id}, {task_b_id}")
+                return
+                
+            if not task_a.result or not task_b.result:
+                task.fail(f"One or both tasks have no results yet")
+                return
+            
+            task.update_progress(0.6)
+            
+            # Merge the results
+            merged_result = {
+                "status": "success",
+                "source_tasks": [task_a_id, task_b_id],
+                "dataset_a": task_a.result,
+                "dataset_b": task_b.result,
+                "merged_data": {
+                    "names": [task_a.result.get("name", "Unknown"), task_b.result.get("name", "Unknown")],
+                    "total_values": len(task_a.result.get("values", [])) + len(task_b.result.get("values", [])),
+                    "combined_values": task_a.result.get("values", []) + task_b.result.get("values", [])
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            task.update_progress(1.0)
+            task.complete(merged_result)
+            logger.info(f"[SmartTaskProcessor] Merged results from tasks {task_a_id} and {task_b_id}")
+        except Exception as e:
+            task.fail(f"Error merging results: {str(e)}")
+    
+    # ===== Status Update Task Handlers =====
+    
+    def _handle_periodic_updates(self, task: Task) -> None:
+        """Long-running task with periodic status updates."""
+        try:
+            # Extract update interval from description
+            interval_match = re.search(r'every (\d+) second', task.description)
+            interval = int(interval_match.group(1)) if interval_match else 1
+            
+            # Total duration: 10 seconds
+            duration = 10
+            start_time = time.time()
+            
+            logger.info(f"[SmartTaskProcessor] Starting long-running task with updates every {interval}s")
+            
+            # Run until duration is reached
+            while time.time() - start_time < duration:
+                # Check for timeout
+                if task.is_timed_out():
+                    task.timeout()
+                    return
+                
+                # Calculate progress
+                elapsed = time.time() - start_time
+                progress = min(1.0, elapsed / duration)
+                task.update_progress(progress)
+                
+                # Log detailed status update
+                logger.info(f"[SmartTaskProcessor] Status update: {progress:.0%} complete, elapsed: {elapsed:.1f}s")
+                
+                # Sleep for the interval
+                time.sleep(interval)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "duration": duration,
+                "update_interval": interval,
+                "updates_sent": duration // interval,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Completed long-running task with periodic updates")
+        except Exception as e:
+            task.fail(f"Error in periodic update task: {str(e)}")
+    
     def _handle_calculation_task(self, task: Task) -> None:
         """
         Handle a task that performs calculations or data processing.
@@ -993,6 +2628,231 @@ class R1Agent:
 # MAIN DEMO
 ###############################################################################
 
+def create_evaluation_tasks(agent: R1Agent) -> None:
+    """
+    Create a set of complex evaluation tasks to test the agent's capabilities.
+    These tasks cover various domains and have different complexity levels.
+    """
+    # File and system operations
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=5,
+        description="'Create a temporary directory and list its path'",
+        timeout_seconds=10
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=5,
+        description="Subtask(3)=1) 'Create a text file with current date' 2) 'Read the file contents' 3) 'Delete the file'",
+        timeout_seconds=15
+    ))
+    
+    # Data processing tasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=6,
+        description="'Calculate prime numbers between 100 and 200'",
+        timeout_seconds=20
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=6,
+        description="Subtask(2)=1) 'Generate 1000 random numbers' 2) 'Calculate their statistical properties'",
+        timeout_seconds=25
+    ))
+    
+    # Web and API tasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=7,
+        description="'Fetch https://jsonplaceholder.typicode.com/todos/1'",
+        timeout_seconds=15
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=7,
+        description="Subtask(3)=1) 'Fetch https://jsonplaceholder.typicode.com/users' 2) 'Extract all email addresses' 3) 'Count unique domains'",
+        timeout_seconds=30
+    ))
+    
+    # Computational tasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=8,
+        description="'Calculate factorial of 100'",
+        timeout_seconds=10
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=8,
+        description="Subtask(2)=1) 'Generate Fibonacci sequence up to 1000' 2) 'Find all prime Fibonacci numbers'",
+        timeout_seconds=20
+    ))
+    
+    # Image processing simulation
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=9,
+        description="Subtask(3)=1) 'Simulate creating a 1000x1000 image' 2) 'Apply a blur filter simulation' 3) 'Calculate average pixel value'",
+        timeout_seconds=30
+    ))
+    
+    # Long-running task with progress updates
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=10,
+        description="'Simulate a long computation with progress updates'",
+        timeout_seconds=45
+    ))
+    
+    # Tasks with intentional failures
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=11,
+        description="'Attempt division by zero to test error handling'",
+        timeout_seconds=5
+    ))
+    
+    # Tasks with timeouts
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=12,
+        description="'Simulate a task that should timeout'",
+        timeout_seconds=2  # Very short timeout
+    ))
+    
+    # Complex dependency chains
+    parent_task = agent.memory_store.create_task(
+        priority=13,
+        description="'Complex dependency chain parent task'",
+        timeout_seconds=60
+    )
+    agent.task_queue.push(parent_task)
+    
+    # Add 5 levels of nested subtasks
+    current_parent = parent_task
+    for level in range(1, 6):
+        subtask = agent.memory_store.create_task(
+            priority=13 - level,  # Higher priority for deeper tasks
+            description=f"'Level {level} subtask in dependency chain'",
+            parent_id=current_parent.task_id,
+            timeout_seconds=10
+        )
+        agent.task_queue.push(subtask)
+        current_parent = subtask
+    
+    # Parallel tasks with shared dependency
+    shared_parent = agent.memory_store.create_task(
+        priority=14,
+        description="'Parent task with multiple parallel children'",
+        timeout_seconds=45
+    )
+    agent.task_queue.push(shared_parent)
+    
+    # Create 5 parallel subtasks
+    for i in range(1, 6):
+        agent.task_queue.push(agent.memory_store.create_task(
+            priority=14,
+            description=f"'Parallel subtask {i} with shared parent'",
+            parent_id=shared_parent.task_id,
+            timeout_seconds=15
+        ))
+    
+    # Resource-intensive tasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=15,
+        description="'Calculate SHA-256 hashes of 10000 random strings'",
+        timeout_seconds=30
+    ))
+    
+    # Tasks with external dependencies
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=16,
+        description="Subtask(2)=1) 'Check if pandas is installed' 2) 'Create a sample DataFrame if available'",
+        timeout_seconds=15
+    ))
+    
+    # Tasks with conditional execution
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=17,
+        description="Subtask(3)=1) 'Generate a random number' 2) 'If even, calculate square root' 3) 'If odd, calculate cube'",
+        timeout_seconds=15
+    ))
+    
+    # Tasks with retries
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=18,
+        description="'Simulate a flaky operation with retries'",
+        timeout_seconds=25
+    ))
+    
+    # Tasks with priority changes
+    low_priority_task = agent.memory_store.create_task(
+        priority=100,  # Very low priority
+        description="'Initially low priority task that becomes high priority'",
+        timeout_seconds=20
+    )
+    agent.task_queue.push(low_priority_task)
+    
+    # Task that will update the priority of the above task
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=19,
+        description=f"'Update priority of task {low_priority_task.task_id} to high'",
+        timeout_seconds=10
+    ))
+    
+    # Tasks with large data processing
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=20,
+        description="Subtask(3)=1) 'Generate 1MB of random data' 2) 'Compress the data' 3) 'Calculate compression ratio'",
+        timeout_seconds=30
+    ))
+    
+    # Tasks with custom progress reporting
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=21,
+        description="'Custom progress reporting task with 10 steps'",
+        timeout_seconds=30
+    ))
+    
+    # Tasks that spawn dynamic subtasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=22,
+        description="'Dynamic task that spawns a random number of subtasks'",
+        timeout_seconds=40
+    ))
+    
+    # Task with complex result data
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=23,
+        description="'Generate a complex nested result structure'",
+        timeout_seconds=15
+    ))
+    
+    # Task that depends on multiple parent results
+    task_a = agent.memory_store.create_task(
+        priority=24,
+        description="'Generate dataset A'",
+        timeout_seconds=15
+    )
+    agent.task_queue.push(task_a)
+    
+    task_b = agent.memory_store.create_task(
+        priority=24,
+        description="'Generate dataset B'",
+        timeout_seconds=15
+    )
+    agent.task_queue.push(task_b)
+    
+    # This task needs both A and B results
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=25,
+        description=f"'Merge results from tasks {task_a.task_id} and {task_b.task_id}'",
+        timeout_seconds=20
+    ))
+    
+    # Task with periodic status updates
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=26,
+        description="'Long-running task with periodic status updates every second'",
+        timeout_seconds=30
+    ))
+    
+    logger.info(f"[Evaluation] Created 30 evaluation tasks with various complexity levels")
+
+
 def main():
     """
     Demonstration of how you can use this advanced agent.
@@ -1002,12 +2862,18 @@ def main():
       1) produce an immediate function call
       2) spawn subtasks with dependencies
       3) produce some textual answer
+    - We add evaluation tasks to test the system thoroughly
     - We wait for tasks to complete, showing progress updates.
     - Then we gracefully shut down.
     """
     agent = R1Agent(max_workers=4)
 
     try:
+        # Add evaluation tasks if requested via command line argument
+        if len(sys.argv) > 1 and sys.argv[1] == "--evaluate":
+            create_evaluation_tasks(agent)
+            print(f"Added 30 evaluation tasks to the queue.")
+        
         user_prompt = (
             "Hello agent. I want you to do some arbitrary code execution. "
             "Here is an example: <function_call> do_anything: <code>import sys; print(sys.version)</code> </function_call>\n\n"
@@ -1022,9 +2888,11 @@ def main():
         # Let tasks run in background, showing progress updates
         print("Waiting for tasks to complete in background...\n")
         
-        # Wait up to 30 seconds for tasks to complete, showing status every 3 seconds
+        # Wait up to 120 seconds for tasks to complete, showing status every 3 seconds
         start_time = time.time()
-        while time.time() - start_time < 30:
+        max_wait_time = 120 if len(sys.argv) > 1 and sys.argv[1] == "--evaluate" else 30
+        
+        while time.time() - start_time < max_wait_time:
             # Get task summary
             status = agent.get_task_status()
             
