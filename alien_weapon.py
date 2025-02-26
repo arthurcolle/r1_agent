@@ -572,7 +572,17 @@ class FunctionAdapter:
 
         return {"status": "success", "executed_code": code, "output": output}
 
-    def execute_shell_command(self, command: str, long_running: bool = False) -> Dict[str, Any]:
+    def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Process <function_call> tags in the text and execute the code within.
+        """
+        function_call_pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
+        matches = re.findall(function_call_pattern, text, re.DOTALL)
+        results = []
+        for match in matches:
+            result = self.do_anything(match)
+            results.append(result)
+        return results if results else None
         """
         Execute a shell command. If long_running is True, use nohup to run it in the background.
         """
