@@ -3499,6 +3499,7 @@ class SmartTaskProcessor:
     def _analyze_ood_input(self, input_text: str) -> dict:
         """Analyze OOD input to determine its characteristics."""
         import re
+        import math
         from collections import Counter
         
         # Determine if input is primarily numeric, text, or mixed
