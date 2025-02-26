@@ -96,11 +96,12 @@ class GRPOAgent(BaseRLAgent):
     A demonstration of Group Relative Policy Optimization that bypasses the critic
     by sampling multiple responses and normalizing the reward.
     """
-    def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2):
+    def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2, entropy_coef: float = 0.01):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.clip_epsilon = clip_epsilon
+        self.entropy_coef = entropy_coef
 
         self.policy_network = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
@@ -174,6 +175,10 @@ class GRPOAgent(BaseRLAgent):
         loss_1 = ratio * advantages_t
         loss_2 = clipped_ratio * advantages_t
         policy_loss = -torch.min(loss_1, loss_2).mean()
+
+        # Add entropy bonus for more diverse exploration
+        entropy = -torch.sum(current_probs * torch.log(current_probs + 1e-8), dim=1).mean()
+        policy_loss = policy_loss - self.entropy_coef * entropy
 
         self.optimizer.zero_grad()
         policy_loss.backward()
