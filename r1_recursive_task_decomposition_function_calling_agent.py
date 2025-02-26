@@ -4070,7 +4070,69 @@ def create_evaluation_tasks(agent: R1Agent) -> None:
         timeout_seconds=30
     ))
     
-    logger.info(f"[Evaluation] Created 30 evaluation tasks with various complexity levels")
+    # Advanced computational tasks
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=27,
+        description="'Calculate the first 1000 digits of pi using the Chudnovsky algorithm'",
+        timeout_seconds=60
+    ))
+    
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=28,
+        description="Subtask(3)=1) 'Generate all permutations of the string \"ALGORITHM\"' 2) 'Count unique permutations' 3) 'Find lexicographically smallest permutation'",
+        timeout_seconds=45
+    ))
+    
+    # Complex recursive problems
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=29,
+        description="'Solve the Tower of Hanoi problem for 7 disks, tracking each move'",
+        timeout_seconds=30
+    ))
+    
+    # Advanced data processing
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=30,
+        description="Subtask(4)=1) 'Generate a 1000x1000 matrix of random integers' 2) 'Find eigenvalues and eigenvectors' 3) 'Calculate matrix determinant' 4) 'Perform matrix inversion'",
+        timeout_seconds=90
+    ))
+    
+    # Complex graph algorithms
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=31,
+        description="Subtask(3)=1) 'Generate a random directed graph with 100 nodes' 2) 'Find all strongly connected components' 3) 'Calculate shortest paths using Dijkstra's algorithm'",
+        timeout_seconds=60
+    ))
+    
+    # NP-hard problem (simplified)
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=32,
+        description="'Solve the Traveling Salesman Problem for 12 random cities using a genetic algorithm'",
+        timeout_seconds=120
+    ))
+    
+    # Cryptographic challenge
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=33,
+        description="Subtask(3)=1) 'Generate an RSA key pair with 2048 bits' 2) 'Encrypt a sample message' 3) 'Decrypt the message and verify correctness'",
+        timeout_seconds=45
+    ))
+    
+    # Complex text processing
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=34,
+        description="Subtask(4)=1) 'Generate a synthetic corpus of 10,000 sentences' 2) 'Build a frequency distribution of words' 3) 'Implement TF-IDF scoring' 4) 'Find the most significant terms'",
+        timeout_seconds=75
+    ))
+    
+    # Recursive mathematical sequence
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=35,
+        description="'Calculate the first 100 terms of the Recamán sequence and find patterns'",
+        timeout_seconds=30
+    ))
+    
+    logger.info(f"[Evaluation] Created 40 evaluation tasks with various complexity levels, including advanced computational challenges")
 
 
 def main():
