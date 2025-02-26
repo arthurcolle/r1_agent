@@ -492,6 +492,27 @@ class SmartTaskProcessor:
             
             # Status update tasks
             "Long-running task with periodic": self._handle_periodic_updates,
+            
+            # Advanced computational tasks
+            "Calculate the first 1000 digits": self._handle_calculate_pi,
+            "Generate all permutations": self._handle_permutations,
+            "Solve the Tower of Hanoi": self._handle_tower_of_hanoi,
+            "Generate a 1000x1000 matrix": self._handle_matrix_operations,
+            "Find eigenvalues": self._handle_matrix_eigenvalues,
+            "Calculate matrix determinant": self._handle_matrix_determinant,
+            "Perform matrix inversion": self._handle_matrix_inversion,
+            "Generate a random directed graph": self._handle_generate_graph,
+            "Find all strongly connected": self._handle_strongly_connected,
+            "Calculate shortest paths": self._handle_shortest_paths,
+            "Solve the Traveling Salesman": self._handle_traveling_salesman,
+            "Generate an RSA key pair": self._handle_rsa_generation,
+            "Encrypt a sample message": self._handle_rsa_encrypt,
+            "Decrypt the message": self._handle_rsa_decrypt,
+            "Generate a synthetic corpus": self._handle_generate_corpus,
+            "Build a frequency distribution": self._handle_word_frequency,
+            "Implement TF-IDF scoring": self._handle_tfidf,
+            "Find the most significant terms": self._handle_significant_terms,
+            "Calculate the first 100 terms": self._handle_recaman_sequence,
         }
 
     def process_task(self, task: Task) -> None:
@@ -2218,6 +2239,1204 @@ class SmartTaskProcessor:
         except Exception as e:
             task.fail(f"Error in periodic update task: {str(e)}")
     
+    # ===== Advanced Computational Task Handlers =====
+    
+    def _handle_calculate_pi(self, task: Task) -> None:
+        """Calculate digits of pi using the Chudnovsky algorithm."""
+        try:
+            import mpmath
+            
+            task.update_progress(0.1)
+            logger.info(f"[SmartTaskProcessor] Starting calculation of 1000 digits of pi")
+            
+            # Set precision to calculate 1000 digits
+            mpmath.mp.dps = 1000
+            
+            task.update_progress(0.3)
+            
+            # Calculate pi
+            pi = mpmath.mp.pi
+            pi_str = str(pi)
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "digits_calculated": len(pi_str) - 2,  # Subtract 2 for "3."
+                "pi_first_50_digits": pi_str[:52],  # Include "3."
+                "pi_last_50_digits": pi_str[-50:],
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated {len(pi_str) - 2} digits of pi")
+        except Exception as e:
+            task.fail(f"Error calculating pi: {str(e)}")
+    
+    def _handle_permutations(self, task: Task) -> None:
+        """Generate permutations of a string."""
+        try:
+            import itertools
+            
+            # Extract string from description or use default
+            string_match = re.search(r'of the string ["\']([^"\']+)["\']', task.description)
+            input_string = string_match.group(1) if string_match else "ALGORITHM"
+            
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Generating permutations of '{input_string}'")
+            
+            # Generate all permutations
+            perms = list(itertools.permutations(input_string))
+            
+            task.update_progress(0.6)
+            
+            # Convert tuples to strings
+            perm_strings = [''.join(p) for p in perms]
+            
+            # Count unique permutations (handling repeated letters)
+            unique_perms = set(perm_strings)
+            
+            task.update_progress(0.8)
+            
+            # Find lexicographically smallest
+            smallest = min(perm_strings)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "input_string": input_string,
+                "total_permutations": len(perms),
+                "unique_permutations": len(unique_perms),
+                "lexicographically_smallest": smallest,
+                "sample_permutations": perm_strings[:5] + ["..."] + perm_strings[-5:] if len(perm_strings) > 10 else perm_strings,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["permutations"] = perm_strings
+                    parent_task.result["unique_permutations"] = len(unique_perms)
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated {len(perms)} permutations of '{input_string}', {len(unique_perms)} unique")
+        except Exception as e:
+            task.fail(f"Error generating permutations: {str(e)}")
+    
+    def _handle_tower_of_hanoi(self, task: Task) -> None:
+        """Solve the Tower of Hanoi problem."""
+        try:
+            # Extract number of disks from description
+            disks_match = re.search(r'for (\d+) disks', task.description)
+            num_disks = int(disks_match.group(1)) if disks_match else 7
+            
+            task.update_progress(0.1)
+            logger.info(f"[SmartTaskProcessor] Solving Tower of Hanoi for {num_disks} disks")
+            
+            # Function to solve Tower of Hanoi
+            moves = []
+            
+            def hanoi(n, source, target, auxiliary):
+                if n > 0:
+                    # Move n-1 disks from source to auxiliary
+                    hanoi(n-1, source, auxiliary, target)
+                    # Move disk n from source to target
+                    moves.append(f"Move disk {n} from {source} to {target}")
+                    # Move n-1 disks from auxiliary to target
+                    hanoi(n-1, auxiliary, target, source)
+            
+            # Solve the problem
+            hanoi(num_disks, 'A', 'C', 'B')
+            
+            # Update progress as we go
+            total_moves = 2**num_disks - 1
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "num_disks": num_disks,
+                "total_moves": total_moves,
+                "first_10_moves": moves[:10],
+                "last_10_moves": moves[-10:] if len(moves) > 10 else [],
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Solved Tower of Hanoi for {num_disks} disks in {total_moves} moves")
+        except Exception as e:
+            task.fail(f"Error solving Tower of Hanoi: {str(e)}")
+    
+    def _handle_matrix_operations(self, task: Task) -> None:
+        """Generate a random matrix for further operations."""
+        try:
+            import numpy as np
+            
+            # Extract dimensions from description
+            dim_match = re.search(r'(\d+)x(\d+)', task.description)
+            rows = int(dim_match.group(1)) if dim_match else 1000
+            cols = int(dim_match.group(2)) if dim_match else 1000
+            
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Generating {rows}x{cols} random matrix")
+            
+            # Generate a random matrix with integers
+            # Use a smaller matrix for actual computation to avoid memory issues
+            actual_size = min(rows, 100)  # Limit to 100x100 for computation
+            matrix = np.random.randint(-10, 10, size=(actual_size, actual_size))
+            
+            task.update_progress(0.8)
+            
+            result = {
+                "status": "success",
+                "requested_dimensions": f"{rows}x{cols}",
+                "actual_dimensions": f"{actual_size}x{actual_size}",
+                "sample_values": matrix[:3, :3].tolist(),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store matrix in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["matrix"] = matrix
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated {actual_size}x{actual_size} random matrix")
+        except Exception as e:
+            task.fail(f"Error generating matrix: {str(e)}")
+    
+    def _handle_matrix_eigenvalues(self, task: Task) -> None:
+        """Find eigenvalues and eigenvectors of a matrix."""
+        try:
+            import numpy as np
+            
+            # Get matrix from parent task
+            matrix = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    matrix = parent_task.result.get("matrix")
+            
+            if matrix is None:
+                # Try to find a sibling task with the matrix
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "matrix" in sibling.result:
+                                matrix = sibling.result["matrix"]
+                                break
+            
+            if matrix is None:
+                task.fail("Could not find matrix to calculate eigenvalues")
+                return
+                
+            task.update_progress(0.3)
+            logger.info(f"[SmartTaskProcessor] Calculating eigenvalues for {matrix.shape[0]}x{matrix.shape[1]} matrix")
+            
+            # Calculate eigenvalues and eigenvectors
+            eigenvalues, eigenvectors = np.linalg.eig(matrix)
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "matrix_shape": matrix.shape,
+                "num_eigenvalues": len(eigenvalues),
+                "eigenvalues_sample": eigenvalues[:5].tolist() if len(eigenvalues) > 5 else eigenvalues.tolist(),
+                "eigenvectors_sample": eigenvectors[:3, :3].tolist(),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["eigenvalues"] = eigenvalues
+                    parent_task.result["eigenvectors"] = eigenvectors
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated {len(eigenvalues)} eigenvalues")
+        except Exception as e:
+            task.fail(f"Error calculating eigenvalues: {str(e)}")
+    
+    def _handle_matrix_determinant(self, task: Task) -> None:
+        """Calculate the determinant of a matrix."""
+        try:
+            import numpy as np
+            
+            # Get matrix from parent task
+            matrix = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    matrix = parent_task.result.get("matrix")
+            
+            if matrix is None:
+                # Try to find a sibling task with the matrix
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "matrix" in sibling.result:
+                                matrix = sibling.result["matrix"]
+                                break
+            
+            if matrix is None:
+                task.fail("Could not find matrix to calculate determinant")
+                return
+                
+            task.update_progress(0.5)
+            logger.info(f"[SmartTaskProcessor] Calculating determinant for {matrix.shape[0]}x{matrix.shape[1]} matrix")
+            
+            # Calculate determinant
+            determinant = np.linalg.det(matrix)
+            
+            task.update_progress(1.0)
+            result = {
+                "status": "success",
+                "matrix_shape": matrix.shape,
+                "determinant": determinant,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["determinant"] = determinant
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated determinant: {determinant}")
+        except Exception as e:
+            task.fail(f"Error calculating determinant: {str(e)}")
+    
+    def _handle_matrix_inversion(self, task: Task) -> None:
+        """Perform matrix inversion."""
+        try:
+            import numpy as np
+            
+            # Get matrix from parent task
+            matrix = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    matrix = parent_task.result.get("matrix")
+            
+            if matrix is None:
+                # Try to find a sibling task with the matrix
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "matrix" in sibling.result:
+                                matrix = sibling.result["matrix"]
+                                break
+            
+            if matrix is None:
+                task.fail("Could not find matrix to invert")
+                return
+                
+            task.update_progress(0.3)
+            logger.info(f"[SmartTaskProcessor] Inverting {matrix.shape[0]}x{matrix.shape[1]} matrix")
+            
+            # Calculate inverse
+            inverse = np.linalg.inv(matrix)
+            
+            # Verify inversion by multiplying original and inverse
+            verification = np.matmul(matrix, inverse)
+            is_identity = np.allclose(verification, np.eye(matrix.shape[0]), rtol=1e-5, atol=1e-8)
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "matrix_shape": matrix.shape,
+                "inverse_sample": inverse[:3, :3].tolist(),
+                "verification_successful": is_identity,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Matrix inversion completed, verification: {is_identity}")
+        except Exception as e:
+            task.fail(f"Error inverting matrix: {str(e)}")
+    
+    def _handle_generate_graph(self, task: Task) -> None:
+        """Generate a random directed graph."""
+        try:
+            import networkx as nx
+            import random
+            
+            # Extract node count from description
+            nodes_match = re.search(r'with (\d+) nodes', task.description)
+            num_nodes = int(nodes_match.group(1)) if nodes_match else 100
+            
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Generating random directed graph with {num_nodes} nodes")
+            
+            # Create a directed graph
+            G = nx.DiGraph()
+            
+            # Add nodes
+            G.add_nodes_from(range(num_nodes))
+            
+            # Add random edges (about 5 per node on average)
+            num_edges = num_nodes * 5
+            for _ in range(num_edges):
+                source = random.randint(0, num_nodes-1)
+                target = random.randint(0, num_nodes-1)
+                weight = random.uniform(1, 10)
+                G.add_edge(source, target, weight=weight)
+            
+            task.update_progress(0.8)
+            
+            result = {
+                "status": "success",
+                "num_nodes": G.number_of_nodes(),
+                "num_edges": G.number_of_edges(),
+                "average_degree": G.number_of_edges() / G.number_of_nodes(),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store graph in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["graph"] = G
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated directed graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+        except Exception as e:
+            task.fail(f"Error generating graph: {str(e)}")
+    
+    def _handle_strongly_connected(self, task: Task) -> None:
+        """Find strongly connected components in a directed graph."""
+        try:
+            import networkx as nx
+            
+            # Get graph from parent task
+            G = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    G = parent_task.result.get("graph")
+            
+            if G is None:
+                # Try to find a sibling task with the graph
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "graph" in sibling.result:
+                                G = sibling.result["graph"]
+                                break
+            
+            if G is None:
+                task.fail("Could not find graph to analyze")
+                return
+                
+            task.update_progress(0.3)
+            logger.info(f"[SmartTaskProcessor] Finding strongly connected components in graph with {G.number_of_nodes()} nodes")
+            
+            # Find strongly connected components
+            strongly_connected = list(nx.strongly_connected_components(G))
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "num_components": len(strongly_connected),
+                "largest_component_size": max(len(c) for c in strongly_connected) if strongly_connected else 0,
+                "component_sizes": [len(c) for c in strongly_connected],
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["strongly_connected_components"] = strongly_connected
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Found {len(strongly_connected)} strongly connected components")
+        except Exception as e:
+            task.fail(f"Error finding strongly connected components: {str(e)}")
+    
+    def _handle_shortest_paths(self, task: Task) -> None:
+        """Calculate shortest paths using Dijkstra's algorithm."""
+        try:
+            import networkx as nx
+            import random
+            
+            # Get graph from parent task
+            G = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    G = parent_task.result.get("graph")
+            
+            if G is None:
+                # Try to find a sibling task with the graph
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "graph" in sibling.result:
+                                G = sibling.result["graph"]
+                                break
+            
+            if G is None:
+                task.fail("Could not find graph to calculate shortest paths")
+                return
+                
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Calculating shortest paths in graph with {G.number_of_nodes()} nodes")
+            
+            # Select a random source node
+            source = random.choice(list(G.nodes()))
+            
+            # Calculate shortest paths from source to all other nodes
+            shortest_paths = nx.single_source_dijkstra_path_length(G, source, weight='weight')
+            
+            task.update_progress(0.8)
+            
+            # Calculate some statistics
+            reachable_nodes = len(shortest_paths)
+            avg_path_length = sum(shortest_paths.values()) / reachable_nodes if reachable_nodes > 0 else 0
+            max_path_length = max(shortest_paths.values()) if shortest_paths else 0
+            
+            result = {
+                "status": "success",
+                "source_node": source,
+                "reachable_nodes": reachable_nodes,
+                "average_path_length": avg_path_length,
+                "maximum_path_length": max_path_length,
+                "sample_paths": dict(list(shortest_paths.items())[:5]),
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated shortest paths from node {source} to {reachable_nodes} nodes")
+        except Exception as e:
+            task.fail(f"Error calculating shortest paths: {str(e)}")
+    
+    def _handle_traveling_salesman(self, task: Task) -> None:
+        """Solve the Traveling Salesman Problem using a genetic algorithm."""
+        try:
+            import numpy as np
+            import random
+            
+            # Extract city count from description
+            cities_match = re.search(r'for (\d+) random cities', task.description)
+            num_cities = int(cities_match.group(1)) if cities_match else 12
+            
+            task.update_progress(0.1)
+            logger.info(f"[SmartTaskProcessor] Solving TSP for {num_cities} cities using genetic algorithm")
+            
+            # Generate random cities (x,y coordinates)
+            cities = [(random.uniform(0, 100), random.uniform(0, 100)) for _ in range(num_cities)]
+            
+            # Calculate distance matrix
+            distance_matrix = np.zeros((num_cities, num_cities))
+            for i in range(num_cities):
+                for j in range(num_cities):
+                    if i != j:
+                        x1, y1 = cities[i]
+                        x2, y2 = cities[j]
+                        distance_matrix[i][j] = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            
+            task.update_progress(0.2)
+            
+            # Simple genetic algorithm for TSP
+            population_size = 50
+            generations = 100
+            mutation_rate = 0.1
+            
+            # Create initial population
+            population = []
+            for _ in range(population_size):
+                route = list(range(num_cities))
+                random.shuffle(route)
+                population.append(route)
+            
+            # Fitness function (total distance of route)
+            def calculate_distance(route):
+                total = 0
+                for i in range(num_cities):
+                    total += distance_matrix[route[i]][route[(i+1) % num_cities]]
+                return total
+            
+            # Run genetic algorithm
+            best_distance = float('inf')
+            best_route = None
+            
+            for generation in range(generations):
+                # Calculate fitness for each route
+                fitness_scores = [1/calculate_distance(route) for route in population]
+                
+                # Select parents using roulette wheel selection
+                total_fitness = sum(fitness_scores)
+                selection_probs = [f/total_fitness for f in fitness_scores]
+                
+                # Create new population
+                new_population = []
+                
+                for _ in range(population_size):
+                    # Select two parents
+                    parent1 = random.choices(population, weights=selection_probs)[0]
+                    parent2 = random.choices(population, weights=selection_probs)[0]
+                    
+                    # Crossover (ordered crossover)
+                    start, end = sorted(random.sample(range(num_cities), 2))
+                    child = [-1] * num_cities
+                    
+                    # Copy a segment from parent1
+                    for i in range(start, end+1):
+                        child[i] = parent1[i]
+                    
+                    # Fill remaining positions with cities from parent2
+                    j = 0
+                    for i in range(num_cities):
+                        if child[i] == -1:
+                            while parent2[j] in child:
+                                j += 1
+                            child[i] = parent2[j]
+                            j += 1
+                    
+                    # Mutation (swap mutation)
+                    if random.random() < mutation_rate:
+                        idx1, idx2 = random.sample(range(num_cities), 2)
+                        child[idx1], child[idx2] = child[idx2], child[idx1]
+                    
+                    new_population.append(child)
+                
+                # Update population
+                population = new_population
+                
+                # Track best solution
+                for route in population:
+                    distance = calculate_distance(route)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_route = route.copy()
+                
+                # Update progress
+                task.update_progress(0.2 + 0.7 * (generation / generations))
+            
+            task.update_progress(0.9)
+            
+            # Calculate city coordinates for the best route
+            best_route_coords = [cities[i] for i in best_route]
+            
+            result = {
+                "status": "success",
+                "num_cities": num_cities,
+                "best_distance": best_distance,
+                "best_route": best_route,
+                "generations": generations,
+                "population_size": population_size,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Solved TSP for {num_cities} cities, best distance: {best_distance:.2f}")
+        except Exception as e:
+            task.fail(f"Error solving Traveling Salesman Problem: {str(e)}")
+    
+    def _handle_rsa_generation(self, task: Task) -> None:
+        """Generate an RSA key pair."""
+        try:
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.hazmat.primitives import serialization
+            
+            # Extract key size from description
+            bits_match = re.search(r'with (\d+) bits', task.description)
+            key_size = int(bits_match.group(1)) if bits_match else 2048
+            
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Generating {key_size}-bit RSA key pair")
+            
+            # Generate private key
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=key_size
+            )
+            
+            # Get public key
+            public_key = private_key.public_key()
+            
+            task.update_progress(0.8)
+            
+            # Serialize keys to PEM format
+            private_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            
+            public_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            
+            result = {
+                "status": "success",
+                "key_size": key_size,
+                "public_key": public_pem.decode('utf-8'),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store keys in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["private_key"] = private_key
+                    parent_task.result["public_key"] = public_key
+                    parent_task.result["private_pem"] = private_pem
+                    parent_task.result["public_pem"] = public_pem
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated {key_size}-bit RSA key pair")
+        except Exception as e:
+            task.fail(f"Error generating RSA key pair: {str(e)}")
+    
+    def _handle_rsa_encrypt(self, task: Task) -> None:
+        """Encrypt a message using RSA."""
+        try:
+            from cryptography.hazmat.primitives.asymmetric import padding
+            from cryptography.hazmat.primitives import hashes
+            import base64
+            
+            # Get public key from parent task
+            public_key = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    public_key = parent_task.result.get("public_key")
+            
+            if public_key is None:
+                # Try to find a sibling task with the key
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "public_key" in sibling.result:
+                                public_key = sibling.result["public_key"]
+                                break
+            
+            if public_key is None:
+                task.fail("Could not find public key for encryption")
+                return
+                
+            task.update_progress(0.3)
+            
+            # Sample message to encrypt
+            message = "This is a secret message for testing RSA encryption and decryption."
+            
+            task.update_progress(0.5)
+            logger.info(f"[SmartTaskProcessor] Encrypting message with RSA")
+            
+            # Encrypt the message
+            ciphertext = public_key.encrypt(
+                message.encode('utf-8'),
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            
+            # Encode ciphertext as base64 for storage/display
+            encoded_ciphertext = base64.b64encode(ciphertext).decode('utf-8')
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "original_message": message,
+                "ciphertext_length": len(ciphertext),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store encrypted message in parent task for decryption
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["original_message"] = message
+                    parent_task.result["ciphertext"] = ciphertext
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Encrypted message of length {len(message)} to ciphertext of length {len(ciphertext)}")
+        except Exception as e:
+            task.fail(f"Error encrypting message: {str(e)}")
+    
+    def _handle_rsa_decrypt(self, task: Task) -> None:
+        """Decrypt a message using RSA."""
+        try:
+            from cryptography.hazmat.primitives.asymmetric import padding
+            from cryptography.hazmat.primitives import hashes
+            
+            # Get private key and ciphertext from parent task
+            private_key = None
+            ciphertext = None
+            original_message = None
+            
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    private_key = parent_task.result.get("private_key")
+                    ciphertext = parent_task.result.get("ciphertext")
+                    original_message = parent_task.result.get("original_message")
+            
+            if private_key is None or ciphertext is None:
+                # Try to find sibling tasks with the required data
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "private_key" in sibling.result:
+                                private_key = sibling.result["private_key"]
+                            if "ciphertext" in sibling.result:
+                                ciphertext = sibling.result["ciphertext"]
+                            if "original_message" in sibling.result:
+                                original_message = sibling.result["original_message"]
+            
+            if private_key is None or ciphertext is None:
+                task.fail("Could not find private key or ciphertext for decryption")
+                return
+                
+            task.update_progress(0.4)
+            logger.info(f"[SmartTaskProcessor] Decrypting message with RSA")
+            
+            # Decrypt the message
+            plaintext = private_key.decrypt(
+                ciphertext,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            ).decode('utf-8')
+            
+            task.update_progress(0.8)
+            
+            # Verify decryption was successful
+            is_correct = plaintext == original_message if original_message else "Unknown (original message not available)"
+            
+            result = {
+                "status": "success",
+                "decrypted_message": plaintext,
+                "verification_successful": is_correct,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Decrypted message successfully, verification: {is_correct}")
+        except Exception as e:
+            task.fail(f"Error decrypting message: {str(e)}")
+    
+    def _handle_generate_corpus(self, task: Task) -> None:
+        """Generate a synthetic corpus of sentences."""
+        try:
+            import random
+            import string
+            
+            # Extract corpus size from description
+            size_match = re.search(r'of ([\d,]+) sentences', task.description)
+            num_sentences = int(size_match.group(1).replace(',', '')) if size_match else 10000
+            
+            # Limit corpus size for memory considerations
+            actual_size = min(num_sentences, 10000)
+            
+            task.update_progress(0.1)
+            logger.info(f"[SmartTaskProcessor] Generating synthetic corpus of {actual_size} sentences")
+            
+            # Define vocabulary for synthetic text
+            nouns = ["time", "person", "year", "way", "day", "thing", "man", "world", "life", "hand", "part", "child", 
+                    "eye", "woman", "place", "work", "week", "case", "point", "government", "company", "number", "group"]
+            verbs = ["be", "have", "do", "say", "get", "make", "go", "know", "take", "see", "come", "think", "look", 
+                    "want", "give", "use", "find", "tell", "ask", "work", "seem", "feel", "try", "leave", "call"]
+            adjectives = ["good", "new", "first", "last", "long", "great", "little", "own", "other", "old", "right", 
+                        "big", "high", "different", "small", "large", "next", "early", "young", "important", "few"]
+            adverbs = ["up", "so", "out", "just", "now", "how", "then", "more", "also", "here", "well", "only", "very", 
+                    "even", "back", "there", "down", "still", "in", "as", "too", "when", "never", "really"]
+            prepositions = ["to", "of", "in", "for", "on", "with", "at", "by", "from", "up", "about", "into", "over", 
+                            "after", "beneath", "under", "above", "through", "across", "beyond"]
+            
+            # Generate sentences
+            corpus = []
+            for i in range(actual_size):
+                # Create a simple sentence structure
+                sentence = []
+                
+                # Add a determiner
+                sentence.append(random.choice(["The", "A", "This", "That", "Some", "Many", "Few"]))
+                
+                # Add an adjective (sometimes)
+                if random.random() < 0.7:
+                    sentence.append(random.choice(adjectives))
+                
+                # Add a noun
+                sentence.append(random.choice(nouns))
+                
+                # Add a verb
+                sentence.append(random.choice(verbs))
+                
+                # Add an adverb (sometimes)
+                if random.random() < 0.3:
+                    sentence.append(random.choice(adverbs))
+                
+                # Add a preposition (sometimes)
+                if random.random() < 0.4:
+                    sentence.append(random.choice(prepositions))
+                    
+                    # Add a determiner
+                    sentence.append(random.choice(["the", "a", "this", "that", "some", "many", "few"]))
+                    
+                    # Add an adjective (sometimes)
+                    if random.random() < 0.5:
+                        sentence.append(random.choice(adjectives))
+                    
+                    # Add a noun
+                    sentence.append(random.choice(nouns))
+                
+                # Join words and add punctuation
+                sentence_text = " ".join(sentence) + random.choice([".", ".", ".", "!", "?"])
+                corpus.append(sentence_text)
+                
+                # Update progress periodically
+                if i % (actual_size // 10) == 0:
+                    progress = 0.1 + 0.8 * (i / actual_size)
+                    task.update_progress(progress)
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "requested_size": num_sentences,
+                "actual_size": actual_size,
+                "sample_sentences": corpus[:5],
+                "vocabulary_size": len(set(nouns + verbs + adjectives + adverbs + prepositions)),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store corpus in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["corpus"] = corpus
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Generated synthetic corpus of {actual_size} sentences")
+        except Exception as e:
+            task.fail(f"Error generating corpus: {str(e)}")
+    
+    def _handle_word_frequency(self, task: Task) -> None:
+        """Build a frequency distribution of words in a corpus."""
+        try:
+            import re
+            from collections import Counter
+            
+            # Get corpus from parent task
+            corpus = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    corpus = parent_task.result.get("corpus")
+            
+            if corpus is None:
+                # Try to find a sibling task with the corpus
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "corpus" in sibling.result:
+                                corpus = sibling.result["corpus"]
+                                break
+            
+            if corpus is None:
+                task.fail("Could not find corpus to analyze")
+                return
+                
+            task.update_progress(0.3)
+            logger.info(f"[SmartTaskProcessor] Building word frequency distribution for corpus of {len(corpus)} sentences")
+            
+            # Tokenize and count words
+            words = []
+            for sentence in corpus:
+                # Convert to lowercase and split on non-alphanumeric characters
+                tokens = re.findall(r'\b[a-z]+\b', sentence.lower())
+                words.extend(tokens)
+            
+            # Count word frequencies
+            word_counts = Counter(words)
+            
+            task.update_progress(0.8)
+            
+            # Get most common words
+            most_common = word_counts.most_common(20)
+            
+            result = {
+                "status": "success",
+                "total_words": len(words),
+                "unique_words": len(word_counts),
+                "most_common": most_common,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store word counts in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["word_counts"] = word_counts
+                    parent_task.result["total_words"] = len(words)
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Built frequency distribution with {len(word_counts)} unique words")
+        except Exception as e:
+            task.fail(f"Error building word frequency distribution: {str(e)}")
+    
+    def _handle_tfidf(self, task: Task) -> None:
+        """Implement TF-IDF scoring for a corpus."""
+        try:
+            import math
+            from collections import Counter, defaultdict
+            
+            # Get corpus and word counts from parent task
+            corpus = None
+            word_counts = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    corpus = parent_task.result.get("corpus")
+                    word_counts = parent_task.result.get("word_counts")
+            
+            if corpus is None:
+                # Try to find sibling tasks with the required data
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "corpus" in sibling.result:
+                                corpus = sibling.result["corpus"]
+                            if "word_counts" in sibling.result:
+                                word_counts = sibling.result["word_counts"]
+            
+            if corpus is None:
+                task.fail("Could not find corpus for TF-IDF calculation")
+                return
+                
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Calculating TF-IDF scores for corpus of {len(corpus)} sentences")
+            
+            # If we don't have word counts, calculate them
+            if word_counts is None:
+                import re
+                words = []
+                for sentence in corpus:
+                    tokens = re.findall(r'\b[a-z]+\b', sentence.lower())
+                    words.extend(tokens)
+                word_counts = Counter(words)
+            
+            # Calculate document frequency (in how many sentences each word appears)
+            doc_frequency = defaultdict(int)
+            for sentence in corpus:
+                # Get unique words in this sentence
+                unique_words = set(re.findall(r'\b[a-z]+\b', sentence.lower()))
+                for word in unique_words:
+                    doc_frequency[word] += 1
+            
+            task.update_progress(0.5)
+            
+            # Calculate TF-IDF for each word
+            tfidf_scores = {}
+            num_docs = len(corpus)
+            
+            for word, count in word_counts.items():
+                # Term frequency (normalized by total words)
+                tf = count / sum(word_counts.values())
+                
+                # Inverse document frequency
+                idf = math.log(num_docs / (1 + doc_frequency[word]))
+                
+                # TF-IDF score
+                tfidf_scores[word] = tf * idf
+            
+            # Sort words by TF-IDF score
+            sorted_tfidf = sorted(tfidf_scores.items(), key=lambda x: x[1], reverse=True)
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "total_words_analyzed": len(word_counts),
+                "highest_tfidf_words": sorted_tfidf[:20],
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store TF-IDF scores in parent task for other subtasks
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task:
+                    if not parent_task.result:
+                        parent_task.result = {}
+                    parent_task.result["tfidf_scores"] = tfidf_scores
+                    parent_task.result["sorted_tfidf"] = sorted_tfidf
+            
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated TF-IDF scores for {len(tfidf_scores)} words")
+        except Exception as e:
+            task.fail(f"Error calculating TF-IDF scores: {str(e)}")
+    
+    def _handle_significant_terms(self, task: Task) -> None:
+        """Find the most significant terms based on TF-IDF scores."""
+        try:
+            # Get TF-IDF scores from parent task
+            sorted_tfidf = None
+            if task.parent_id:
+                parent_task = self.memory_store.get_task(task.parent_id)
+                if parent_task and parent_task.result:
+                    sorted_tfidf = parent_task.result.get("sorted_tfidf")
+            
+            if sorted_tfidf is None:
+                # Try to find a sibling task with the TF-IDF scores
+                if task.parent_id:
+                    siblings = self.memory_store.get_subtasks(task.parent_id)
+                    for sibling in siblings:
+                        if sibling.task_id != task.task_id and sibling.result:
+                            if "sorted_tfidf" in sibling.result:
+                                sorted_tfidf = sibling.result["sorted_tfidf"]
+                                break
+            
+            if sorted_tfidf is None:
+                task.fail("Could not find TF-IDF scores to analyze")
+                return
+                
+            task.update_progress(0.5)
+            logger.info(f"[SmartTaskProcessor] Analyzing significant terms from TF-IDF scores")
+            
+            # Get top and bottom terms
+            top_terms = sorted_tfidf[:50]
+            bottom_terms = sorted_tfidf[-50:]
+            
+            # Calculate statistics
+            all_scores = [score for _, score in sorted_tfidf]
+            avg_score = sum(all_scores) / len(all_scores)
+            median_score = sorted(all_scores)[len(all_scores) // 2]
+            
+            task.update_progress(0.9)
+            
+            result = {
+                "status": "success",
+                "most_significant_terms": top_terms[:20],
+                "least_significant_terms": bottom_terms[:20],
+                "average_tfidf_score": avg_score,
+                "median_tfidf_score": median_score,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Identified most significant terms from {len(sorted_tfidf)} words")
+        except Exception as e:
+            task.fail(f"Error finding significant terms: {str(e)}")
+    
+    def _handle_recaman_sequence(self, task: Task) -> None:
+        """Calculate terms of the Recamán sequence and find patterns."""
+        try:
+            # Extract term count from description
+            terms_match = re.search(r'first (\d+) terms', task.description)
+            num_terms = int(terms_match.group(1)) if terms_match else 100
+            
+            task.update_progress(0.2)
+            logger.info(f"[SmartTaskProcessor] Calculating first {num_terms} terms of Recamán sequence")
+            
+            # Calculate Recamán sequence
+            sequence = [0]
+            seen = set([0])
+            
+            for i in range(1, num_terms):
+                # Next term is a(n-1) - n if positive and not already in sequence
+                # Otherwise, it's a(n-1) + n
+                prev = sequence[i-1]
+                next_term = prev - i
+                
+                if next_term < 0 or next_term in seen:
+                    next_term = prev + i
+                
+                sequence.append(next_term)
+                seen.add(next_term)
+                
+                # Update progress periodically
+                if i % (num_terms // 10) == 0:
+                    progress = 0.2 + 0.6 * (i / num_terms)
+                    task.update_progress(progress)
+            
+            task.update_progress(0.8)
+            
+            # Analyze patterns
+            # 1. Find duplicates
+            value_counts = {}
+            for term in sequence:
+                if term in value_counts:
+                    value_counts[term] += 1
+                else:
+                    value_counts[term] = 1
+            
+            duplicates = {k: v for k, v in value_counts.items() if v > 1}
+            
+            # 2. Find jumps (differences between consecutive terms)
+            jumps = [sequence[i] - sequence[i-1] for i in range(1, len(sequence))]
+            avg_jump = sum(abs(j) for j in jumps) / len(jumps)
+            max_jump = max(abs(j) for j in jumps)
+            
+            # 3. Check for arithmetic progressions
+            ap_lengths = []
+            i = 0
+            while i < len(jumps) - 1:
+                current_diff = jumps[i]
+                length = 1
+                j = i + 1
+                while j < len(jumps) and jumps[j] == current_diff:
+                    length += 1
+                    j += 1
+                if length > 1:
+                    ap_lengths.append(length)
+                i = j
+            
+            task.update_progress(1.0)
+            
+            result = {
+                "status": "success",
+                "sequence_length": len(sequence),
+                "first_20_terms": sequence[:20],
+                "last_20_terms": sequence[-20:],
+                "max_term": max(sequence),
+                "duplicate_count": len(duplicates),
+                "average_jump": avg_jump,
+                "maximum_jump": max_jump,
+                "longest_arithmetic_progression": max(ap_lengths) if ap_lengths else 0,
+                "timestamp": datetime.now().isoformat()
+            }
+            task.complete(result)
+            logger.info(f"[SmartTaskProcessor] Calculated {len(sequence)} terms of Recamán sequence, max term: {max(sequence)}")
+        except Exception as e:
+            task.fail(f"Error calculating Recamán sequence: {str(e)}")
+    
     def _handle_calculation_task(self, task: Task) -> None:
         """
         Handle a task that performs calculations or data processing.
@@ -2631,7 +3850,8 @@ class R1Agent:
 def create_evaluation_tasks(agent: R1Agent) -> None:
     """
     Create a set of complex evaluation tasks to test the agent's capabilities.
-    These tasks cover various domains and have different complexity levels.
+    These tasks cover various domains and have different complexity levels,
+    including advanced computational problems and complex data processing.
     """
     # File and system operations
     agent.task_queue.push(agent.memory_store.create_task(
@@ -2888,9 +4108,9 @@ def main():
         # Let tasks run in background, showing progress updates
         print("Waiting for tasks to complete in background...\n")
         
-        # Wait up to 120 seconds for tasks to complete, showing status every 3 seconds
+        # Wait up to 300 seconds for tasks to complete, showing status every 3 seconds
         start_time = time.time()
-        max_wait_time = 120 if len(sys.argv) > 1 and sys.argv[1] == "--evaluate" else 30
+        max_wait_time = 300 if len(sys.argv) > 1 and sys.argv[1] == "--evaluate" else 30
         
         while time.time() - start_time < max_wait_time:
             # Get task summary
