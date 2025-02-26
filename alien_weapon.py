@@ -29,6 +29,7 @@ import subprocess
 import requests
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Any, Dict, List, Optional, Tuple, Callable
+from pydantic import BaseModel
 from together import Together
 
 ###############################################################################
