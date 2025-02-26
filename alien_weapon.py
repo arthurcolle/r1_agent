@@ -664,13 +664,15 @@ class TaskScheduler:
 
     def _dynamic_task_prioritization(self) -> None:
         """
-        Dynamically adjust task priorities based on system load, task characteristics, and dependencies.
+        Dynamically adjust task priorities based on structured outputs from task descriptions.
         """
         with self.memory_store._lock:
             for task in self.memory_store.list_tasks():
                 if task.status == "PENDING":
-                    # Advanced logic: Use structured outputs to determine task impact
-                    impact_score = self._calculate_impact_score(task.description)
+                    # Decompose task description into structured prompts
+                    extracted_prompts = self._decompose_prompt(task.description)
+                    # Calculate impact score based on structured prompts
+                    impact_score = self._calculate_impact_score(extracted_prompts)
                     task.priority = max(0, task.priority - impact_score)
                     logger.info(f"[TaskScheduler] Adjusted priority for task {task.task_id} based on impact score {impact_score}.")
 
