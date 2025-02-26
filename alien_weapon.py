@@ -586,7 +586,7 @@ class FunctionAdapter:
         except Exception as e:
             return {"status": "error", "output": "", "error": str(e)}
 
-    def execute_python_code(self, code: str, long_running: bool = False) -> Dict[str, Any]:
+    def execute_python_code(self, code: str, long_running: bool = False, text: str = "") -> Dict[str, Any]:
         """
         Execute Python code. If long_running is True, use threading to run it in the background.
         """
