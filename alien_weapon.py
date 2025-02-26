@@ -542,7 +542,11 @@ class FunctionAdapter:
     """
     def do_anything(self, snippet: str) -> Dict[str, Any]:
         code = snippet.strip()
-        code = code.replace("<code>", "").replace("</code>", "")
+        import re
+        code = re.sub(r"```python\s*", "", code)
+        code = code.replace("```", "")
+        code = re.sub(r"<code\s+language=['\"]python['\"]>\s*", "", code)
+        code = code.replace("</code>", "")
         logger.info(f"[do_anything] Executing code:\n{code}")
         try:
             exec(code, globals(), locals())
