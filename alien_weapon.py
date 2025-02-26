@@ -781,7 +781,27 @@ class R1Agent:
             print(enriched_answer)
             print("\n=========================\n")
 
+        # 8) Use tool calls for data extraction and grounding
+        self._use_tool_calls(facts, thinking, answer)
+
         return full_text
+
+    def _use_tool_calls(self, facts: List[str], thinking: str, answer: str) -> None:
+        """
+        Use tool calls to extract data and provide grounding for the response.
+        """
+        # Example tool call for data extraction
+        extracted_data = self._call_external_tool(facts, thinking, answer)
+        if extracted_data:
+            logger.info(f"[R1Agent] Extracted data: {extracted_data}")
+
+    def _call_external_tool(self, facts: List[str], thinking: str, answer: str) -> Optional[Dict[str, Any]]:
+        """
+        Simulate a call to an external tool for data extraction.
+        """
+        # Placeholder for actual tool call logic
+        logger.info("[R1Agent] Calling external tool for data extraction...")
+        return {"extracted_facts": facts, "extracted_thinking": thinking, "extracted_answer": answer}
         
     def _extract_structured_output(self, text: str) -> Tuple[List[str], str, str]:
         """Extract facts, thinking, and answer from structured output."""
