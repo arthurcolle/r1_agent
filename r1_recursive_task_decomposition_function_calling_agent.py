@@ -651,12 +651,53 @@ class SmartTaskProcessor:
             "Calculate the first 100 terms": self._handle_recaman_sequence,
         }
 
-    def _has_subtasks(self, task: Task) -> bool:
+    def process_task(self, task: Task) -> None:
         """
-        Check if a task has any subtasks.
+        Main logic for how we handle tasks:
+         - 'Recursive decomposition' if needed
+         - 'Function calls' if the text includes them
+         - Update status + result
+         - Handle timeouts
+
+        If the Task spawns subtasks, we create them and place them in the queue.
         """
-        subtasks = self.memory_store.get_subtasks(task.task_id)
-        return len(subtasks) > 0
+        logger.info(f"[SmartTaskProcessor] Starting task {task.task_id} - '{task.description}'")
+        task.start()  # Mark as started and record timestamp
+
+        # Check for timeout before we even start
+        if task.is_timed_out():
+            task.timeout()
+            logger.warning(f"[SmartTaskProcessor] Task {task.task_id} timed out before processing")
+            return
+
+        try:
+            # Process the task based on its description
+            self._process_task_content(task)
+            
+            # Check if all subtasks are completed before marking this task as complete
+            if self._has_subtasks(task):
+                subtasks = self.memory_store.get_subtasks(task.task_id)
+                if all(st.status in ["COMPLETED", "FAILED", "TIMEOUT"] for st in subtasks):
+                    # All subtasks are done, so we can complete this task
+                    task.complete()
+                    logger.info(f"[SmartTaskProcessor] All subtasks of {task.task_id} completed, marking task as COMPLETED")
+                else:
+                    # Some subtasks are still pending/in progress, so we'll requeue this task for later
+                    # But with lower priority to avoid starving other tasks
+                    task.priority += 5
+                    self.task_queue.push(task)
+                    logger.info(f"[SmartTaskProcessor] Task {task.task_id} has pending subtasks, requeuing with lower priority")
+                    return  # Don't mark as completed yet
+            else:
+                # No subtasks, so we can complete this task
+                task.complete()
+                logger.info(f"[SmartTaskProcessor] Completed task {task.task_id}")
+                
+        except Exception as e:
+            tb = traceback.format_exc()
+            error_msg = f"Error processing task: {str(e)}"
+            logger.error(f"[SmartTaskProcessor] {error_msg}\n{tb}")
+            task.fail(error_msg)
         """
         Main logic for how we handle tasks:
          - 'Recursive decomposition' if needed
