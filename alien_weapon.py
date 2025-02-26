@@ -583,21 +583,6 @@ class FunctionAdapter:
             result = self.do_anything(match)
             results.append(result)
         return results if results else None
-        """
-        Execute a shell command. If long_running is True, use nohup to run it in the background.
-        """
-        try:
-            if long_running:
-                command = f"nohup {command} > /dev/null 2>&1 &"
-                os.system(command)
-                return {"status": "success", "output": "Command is running in the background"}
-            else:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
-                return {"status": "success", "output": result.stdout, "error": result.stderr}
-        except subprocess.TimeoutExpired:
-            return {"status": "timeout", "output": "", "error": "Command timed out"}
-        except Exception as e:
-            return {"status": "error", "output": "", "error": str(e)}
 
     def execute_python_code(self, code: str, long_running: bool = False) -> Dict[str, Any]:
         """
@@ -621,8 +606,6 @@ class FunctionAdapter:
                 return {"status": "success", "output": mystdout.getvalue()}
         except Exception as e:
             return {"status": "error", "output": "", "error": str(e)}
-        logger.info(f"[FunctionAdapter] Detected do_anything snippet:\n{snippet}")
-        return self.do_anything(snippet)
 
 ###############################################################################
 # SMART TASK PROCESSOR
