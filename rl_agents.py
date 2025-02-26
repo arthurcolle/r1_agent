@@ -96,12 +96,14 @@ class GRPOAgent(BaseRLAgent):
     A demonstration of Group Relative Policy Optimization that bypasses the critic
     by sampling multiple responses and normalizing the reward.
     """
-    def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2, entropy_coef: float = 0.01):
+    def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2, entropy_coef: float = 0.01, num_epochs: int = 3, kl_target: float = 0.01):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
+        self.num_epochs = num_epochs
+        self.kl_target = kl_target
 
         self.policy_network = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
@@ -137,18 +139,16 @@ class GRPOAgent(BaseRLAgent):
         # Copy current policy to old policy
         self.old_policy_network.load_state_dict(self.policy_network.state_dict())
 
+        # Flatten experiences into arrays
         all_states = []
         all_actions = []
         all_advantages = []
-
-        # For each group, compute mean and std of rewards
         for experiences in group_experiences:
             rewards = [exp[2] for exp in experiences]
-            mean_r = sum(rewards) / len(rewards) if len(rewards) > 0 else 0.0
+            mean_r = sum(rewards) / len(rewards) if len(rewards) else 0.0
             var_r = sum([(r - mean_r)**2 for r in rewards]) / len(rewards) if len(rewards) > 1 else 1e-8
             std_r = var_r**0.5
-            if std_r < 1e-8:
-                std_r = 1e-8
+            std_r = max(std_r, 1e-8)
 
             for (st, ac, rw) in experiences:
                 adv = (rw - mean_r) / std_r
@@ -160,29 +160,40 @@ class GRPOAgent(BaseRLAgent):
         actions_t = torch.tensor(all_actions, dtype=torch.long)
         advantages_t = torch.tensor(all_advantages, dtype=torch.float32)
 
-        # Current log probs
-        current_probs = self.policy_network(states_t)
-        current_actions_probs = torch.gather(current_probs, 1, actions_t.unsqueeze(1)).squeeze(1)
-        current_log_probs = torch.log(current_actions_probs + 1e-8)
+        # We do multiple epochs of updates
+        for epoch in range(self.num_epochs):
+            # Forward pass on current policy
+            current_probs = self.policy_network(states_t)
+            current_actions_probs = torch.gather(current_probs, 1, actions_t.unsqueeze(1)).squeeze(1)
+            current_log_probs = torch.log(current_actions_probs + 1e-8)
 
-        # Old log probs
-        old_probs = self.old_policy_network(states_t)
-        old_actions_probs = torch.gather(old_probs, 1, actions_t.unsqueeze(1)).squeeze(1)
-        old_log_probs = torch.log(old_actions_probs + 1e-8)
+            # Old policy log probs
+            old_probs = self.old_policy_network(states_t)
+            old_actions_probs = torch.gather(old_probs, 1, actions_t.unsqueeze(1)).squeeze(1)
+            old_log_probs = torch.log(old_actions_probs + 1e-8)
 
-        ratio = torch.exp(current_log_probs - old_log_probs)
-        clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
-        loss_1 = ratio * advantages_t
-        loss_2 = clipped_ratio * advantages_t
-        policy_loss = -torch.min(loss_1, loss_2).mean()
+            # Calculate ratio and clipped objective
+            ratio = torch.exp(current_log_probs - old_log_probs)
+            clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
+            loss_1 = ratio * advantages_t
+            loss_2 = clipped_ratio * advantages_t
+            policy_loss = -torch.min(loss_1, loss_2).mean()
 
-        # Add entropy bonus for more diverse exploration
-        entropy = -torch.sum(current_probs * torch.log(current_probs + 1e-8), dim=1).mean()
-        policy_loss = policy_loss - self.entropy_coef * entropy
+            # Entropy for exploration
+            entropy = -torch.sum(current_probs * torch.log(current_probs + 1e-8), dim=1).mean()
+            policy_loss = policy_loss - self.entropy_coef * entropy
 
-        self.optimizer.zero_grad()
-        policy_loss.backward()
-        self.optimizer.step()
+            # KL divergence check
+            with torch.no_grad():
+                kl_div = (old_probs * (torch.log(old_probs + 1e-8) - torch.log(current_probs + 1e-8))).sum(dim=1).mean()
+
+            self.optimizer.zero_grad()
+            policy_loss.backward()
+            self.optimizer.step()
+
+            # Early stopping if KL exceeds target
+            if kl_div.item() > self.kl_target:
+                break
 
     def set_eval_mode(self):
         self.policy_network.eval()
