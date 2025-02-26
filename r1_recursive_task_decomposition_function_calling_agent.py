@@ -12808,47 +12808,116 @@ class ResourceMonitor:
 
 def create_evaluation_tasks(agent: R1Agent) -> None:
     """
-    Create a comprehensive set of real-world tasks to demonstrate the agent's capabilities.
-    These tasks cover practical applications like news searching, research compilation,
-    data analysis, financial modeling, sports statistics, and more.
+    Create an advanced set of initial tasks to demonstrate the agent's enhanced real-world capabilities.
+    These tasks are designed to test multi-step reasoning, dependency management, data analysis,
+    financial modeling, legal analysis, AI ethics, real-time visualization, and self-modification.
     """
-    # ===== NEWS AND CURRENT EVENTS TASKS =====
+    # ===== ADVANCED NEWS AND CURRENT EVENTS TASKS =====
     
-    # Breaking news search and summarization
+    # Task 1: Advanced News Analysis with Sentiment and Factual Verification
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=4,
+        description="'Search for international news on global warming, perform sentiment analysis, and fact-check key claims.'",
+        timeout_seconds=90
+    ))
+    
+    # Task 2: Multi-Layer Research Compilation with Subtasks
     agent.task_queue.push(agent.memory_store.create_task(
         priority=5,
-        description="'Search for breaking news about climate change and summarize the 3 most recent developments'",
-        timeout_seconds=45
+        description="Subtask(4)=1) 'Retrieve academic papers on AI ethics post-2022' 2) 'Extract key findings and controversies' 3) 'Summarize expert opinions' 4) 'Compile a comprehensive research report on AI ethics.'",
+        timeout_seconds=120
     ))
     
-    agent.task_queue.push(agent.memory_store.create_task(
-        priority=5,
-        description="Subtask(3)=1) 'Find the latest tech industry layoffs news' 2) 'Extract affected companies and employee counts' 3) 'Create a summary table with impact statistics'",
-        timeout_seconds=60
-    ))
+    # ===== ADVANCED DATA ANALYSIS AND VISUALIZATION TASKS =====
     
+    # Task 3: Real-Time Sports Analytics with Visualization
     agent.task_queue.push(agent.memory_store.create_task(
         priority=6,
-        description="'Analyze recent news about Federal Reserve interest rate decisions and predict market impact'",
-        timeout_seconds=60
+        description="'Collect current NBA player stats, compute advanced metrics (PER, TS%), and generate interactive visualizations of player performance trends.'",
+        timeout_seconds=90
     ))
     
+    # Task 4: Financial Modeling and Sensitivity Analysis
     agent.task_queue.push(agent.memory_store.create_task(
         priority=6,
-        description="Subtask(3)=1) 'Find news articles about renewable energy breakthroughs from the past month' 2) 'Categorize by technology type (solar, wind, etc.)' 3) 'Identify the most promising innovations based on expert quotes'",
-        timeout_seconds=75
+        description="'Build a detailed DCF model for a selected tech company, perform sensitivity analysis on key assumptions, and provide investment recommendations.'",
+        timeout_seconds=120
     ))
     
+    # ===== ADVANCED TECH & AI TASKS =====
+    
+    # Task 5: Generative AI Deep Dive
     agent.task_queue.push(agent.memory_store.create_task(
         priority=7,
-        description="'Track the latest developments in the Israel-Hamas conflict and create a timeline of key events'",
-        timeout_seconds=60
+        description="'Compare leading generative AI models for text, image, and code generation; analyze performance metrics and produce a detailed comparative report.'",
+        timeout_seconds=90
     ))
     
-    # ===== RESEARCH COMPILATION TASKS =====
+    # Task 6: AI Ethics and Safety Analysis
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=7,
+        description="'Research and compile a comprehensive report on AI safety standards and ethical frameworks across major jurisdictions, highlighting key risks and proposed safeguards.'",
+        timeout_seconds=120
+    ))
     
+    # ===== ADVANCED LEGAL AND REGULATORY ANALYSIS TASKS =====
+    
+    # Task 7: Global Data Privacy Compliance Mapping
     agent.task_queue.push(agent.memory_store.create_task(
         priority=8,
+        description="'Analyze global data privacy regulations (GDPR, CCPA, PIPL, etc.), compare their key provisions, and create a compliance framework for multinational businesses.'",
+        timeout_seconds=90
+    ))
+    
+    # Task 8: Cryptocurrency Regulatory Landscape Analysis with Case Studies
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=8,
+        description="'Compile a detailed analysis of cryptocurrency regulations in major markets, including case studies of enforcement actions and implications for crypto businesses.'",
+        timeout_seconds=90
+    ))
+    
+    # ===== ADVANCED ENVIRONMENTAL AND SUSTAINABILITY TASKS =====
+    
+    # Task 9: Environmental Impact and Sustainability Analysis
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=9,
+        description="'Analyze carbon emission data across industries, evaluate sustainability initiatives, and develop an implementation roadmap for achieving net-zero targets.'",
+        timeout_seconds=90
+    ))
+    
+    # Task 10: Smart City Infrastructure and Energy Efficiency Study
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=9,
+        description="'Research smart city initiatives with a focus on energy efficiency, public transportation innovation, and digital governance; produce a detailed comparative study.'",
+        timeout_seconds=90
+    ))
+    
+    # ===== ADVANCED SELF-MODIFICATION AND LEARNING TASKS =====
+    
+    # Task 11: Autonomous Code Optimization and Self-Improvement Test
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=10,
+        description="'Retrieve and analyze your own codebase, propose and implement optimizations, and report on performance improvements using a self-modification loop.'",
+        timeout_seconds=120
+    ))
+    
+    # Task 12: Real-Time Task Visualization and Resource Monitoring
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=10,
+        description="'Generate an interactive visualization of current task execution and resource utilization; provide insights into system performance and bottlenecks.'",
+        timeout_seconds=90
+    ))
+    
+    # ===== ADVANCED CROSS-DOMAIN MULTI-TASK TEST =====
+    
+    # Task 13: End-to-End Multi-Domain Challenge
+    agent.task_queue.push(agent.memory_store.create_task(
+        priority=10,
+        description="Subtask(5)=1) 'Fetch global news on renewable energy adoption' 2) 'Analyze public sentiment using NLP techniques' 3) 'Compile financial data of top renewable energy companies' 4) 'Perform competitive analysis of clean tech market' 5) 'Create a unified dashboard integrating news trends, financial analysis, and market forecasts.'",
+        timeout_seconds=150
+    ))
+    
+    logger.info(f"[Evaluation] Created 13 advanced initial tasks covering multi-step research, data analysis, financial modeling, technical deep dives, legal regulation, sustainability, and self-improvement challenges.")
         description="'Compile a research report on mRNA vaccine technology advancements since 2020'",
         timeout_seconds=90
     ))
