@@ -578,9 +578,12 @@ class FunctionAdapter:
         """
         try:
             if long_running:
-                command = f"nohup {command} &"
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
-            return {"status": "success", "output": result.stdout, "error": result.stderr}
+                command = f"nohup {command} > /dev/null 2>&1 &"
+                os.system(command)
+                return {"status": "success", "output": "Command is running in the background"}
+            else:
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+                return {"status": "success", "output": result.stdout, "error": result.stderr}
         except subprocess.TimeoutExpired:
             return {"status": "timeout", "output": "", "error": "Command timed out"}
         except Exception as e:
