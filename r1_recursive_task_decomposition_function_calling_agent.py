@@ -651,6 +651,12 @@ class SmartTaskProcessor:
             "Calculate the first 100 terms": self._handle_recaman_sequence,
         }
 
+    def _has_subtasks(self, task: Task) -> bool:
+        """
+        Determine if the given task has any subtasks.
+        """
+        return len(self.memory_store.get_subtasks(task.task_id)) > 0
+
     def process_task(self, task: Task) -> None:
         """
         Main logic for how we handle tasks:
