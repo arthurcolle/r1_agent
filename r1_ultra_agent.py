@@ -897,7 +897,7 @@ class R1Agent:
 
     def generate_response(self, user_input: str) -> str:
         """
-        Feeds the user input to the conversation, calls the LLM,
+        Feeds the user input to the conversation, generates a detailed response,
         checks for do_anything calls, spawns a meta-task from user input.
         """
         # 1) Add user message
@@ -905,6 +905,9 @@ class R1Agent:
 
         # 2) Build messages (system prompt + conversation)
         messages = self._build_messages()
+        
+        # Log that we're processing the user input
+        logger.info(f"[R1Agent] Processing user input: '{user_input}'")
 
         # 3) Call the LLM (or use a dummy response for demonstration)
         try:
@@ -1005,7 +1008,7 @@ class R1Agent:
             answer
         ])
         
-        # Add a sample function call demonstration
+        # Add a sample function call demonstration that will actually execute
         response.extend([
             "",
             "Here's a demonstration of my code execution capability:",
@@ -1013,6 +1016,7 @@ class R1Agent:
             "import datetime",
             "current_time = datetime.datetime.now()",
             "print(f'The current time is {current_time}')",
+            "print('This code is actually executing!')",
             "</code></function_call>"
         ])
         
@@ -1055,9 +1059,9 @@ def main():
 
             # Generate immediate LLM response
             response = agent.generate_response(user_text)
-            print("\n=== Immediate LLM Response ===\n")
+            print("\n=== R1 Agent Response with Internal Processing ===\n")
             print(response)
-            print("\n================================\n")
+            print("\n=================================================\n")
 
             # The agent continues working in background (TaskScheduler).
             # If you want to check tasks, reflection, or goals, do so here or watch the logs.
