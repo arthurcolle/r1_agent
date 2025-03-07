@@ -68,6 +68,8 @@ class TokenBudget:
         self.remaining_budget = initial_budget
         self.usage_history = {}
         self._lock = threading.Lock()
+        self.budget_efficiency = {}
+        self.allocation_history = []
         
         # Try to load tiktoken encoding, fall back to character-based estimation
         try:
@@ -124,6 +126,41 @@ class TokenBudget:
         else:
             self.usage_history[operation] = amount
     
+    def record_allocation(self, allocations: Dict[str, int]) -> None:
+        """
+        Record a set of budget allocations
+        
+        Args:
+            allocations: Dictionary mapping operations to token allocations
+        """
+        with self._lock:
+            timestamp = datetime.now().isoformat()
+            self.allocation_history.append({
+                "timestamp": timestamp,
+                "allocations": allocations.copy()
+            })
+    
+    def update_efficiency(self, operation: str, allocated: int, used: int) -> float:
+        """
+        Update efficiency metrics for an operation
+        
+        Args:
+            operation: The operation name
+            allocated: Tokens allocated
+            used: Tokens actually used
+            
+        Returns:
+            float: Efficiency percentage
+        """
+        with self._lock:
+            if allocated <= 0:
+                efficiency = 0.0
+            else:
+                efficiency = (used / allocated) * 100
+                
+            self.budget_efficiency[operation] = efficiency
+            return efficiency
+    
     def get_budget_status(self) -> Dict[str, Any]:
         """Get the current budget status"""
         with self._lock:
@@ -132,7 +169,9 @@ class TokenBudget:
                 "remaining_budget": self.remaining_budget,
                 "used_budget": self.initial_budget - self.remaining_budget,
                 "usage_by_operation": self.usage_history.copy(),
-                "token_counting_method": self.token_counting_method
+                "efficiency_by_operation": self.budget_efficiency.copy(),
+                "token_counting_method": self.token_counting_method,
+                "allocation_history": self.allocation_history
             }
     
     def add_to_budget(self, amount: int) -> int:
@@ -148,6 +187,58 @@ class TokenBudget:
                 self.initial_budget = new_budget
             self.remaining_budget = self.initial_budget
             self.usage_history = {}
+            self.budget_efficiency = {}
+            
+    def get_recommended_allocation(self) -> Dict[str, int]:
+        """
+        Get recommended token allocation based on historical efficiency
+        
+        Returns:
+            Dict mapping operations to recommended token allocations
+        """
+        with self._lock:
+            if not self.budget_efficiency:
+                # Default allocation if no history
+                return {
+                    "thinking": 3000,
+                    "facts": 1000,
+                    "cognition": 1000,
+                    "answer": 2000,
+                    "task_decomposition": 1000
+                }
+                
+            # Calculate allocation based on efficiency and past usage
+            total_budget = self.initial_budget
+            allocations = {}
+            
+            # First pass: allocate based on efficiency
+            remaining = total_budget
+            for operation, efficiency in sorted(self.budget_efficiency.items(), key=lambda x: x[1], reverse=True):
+                # Higher efficiency gets more tokens
+                weight = efficiency / 100  # Convert percentage to weight
+                allocation = int(total_budget * weight * 0.2)  # 20% influence from efficiency
+                allocations[operation] = allocation
+                remaining -= allocation
+                
+            # Second pass: adjust based on historical usage
+            if self.usage_history:
+                total_usage = sum(self.usage_history.values())
+                if total_usage > 0:
+                    for operation in allocations:
+                        usage = self.usage_history.get(operation, 0)
+                        usage_ratio = usage / total_usage
+                        usage_allocation = int(remaining * usage_ratio * 0.8)  # 80% influence from usage
+                        allocations[operation] += usage_allocation
+                        
+            # Ensure we don't exceed budget
+            total_allocated = sum(allocations.values())
+            if total_allocated > total_budget:
+                # Scale down proportionally
+                scale = total_budget / total_allocated
+                for operation in allocations:
+                    allocations[operation] = int(allocations[operation] * scale)
+                    
+            return allocations
 
 ###############################################################################
 # DATA STRUCTURES FOR TASK MANAGEMENT
@@ -3173,6 +3264,12 @@ class R1Agent:
         self.knowledge_base.add_fact("budget planning",
             "The process of allocating tokens across different phases (thinking, response generation, etc.) based on priorities."
         )
+        self.knowledge_base.add_fact("budget efficiency",
+            "The ratio of useful output produced to tokens consumed, measured by comparing allocated tokens to actual usage."
+        )
+        self.knowledge_base.add_fact("emergent budgeting",
+            "A self-organizing approach where the agent learns to allocate its token budget optimally based on task requirements."
+        )
 
     def add_goal(self, name: str, description: str, priority: int = 5, 
                 deadline: Optional[float] = None, 
@@ -3211,9 +3308,9 @@ class R1Agent:
             confidence=0.8
         )
         
-        # Add structured output format instruction with cognitive behaviors and token budget
+        # Add structured output format instruction with cognitive behaviors and emergent budgeting
         structured_prompt = messages.copy()
-        structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<request_tokens> thinking: 2000 </request_tokens>\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<request_tokens> facts: 500 </request_tokens>\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<request_tokens> cognition: 500 </request_tokens>\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<request_tokens> answer: 1000 </request_tokens>\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>\n\n<budget_status/>"
+        structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<budget_request>\nI need to allocate my 8000 token budget across different phases of my response. Here's my proposed allocation:\n- thinking: [TOKENS] tokens for deep reasoning\n- facts: [TOKENS] tokens for key information\n- cognition: [TOKENS] tokens for cognitive analysis\n- answer: [TOKENS] tokens for final response\n- task_decomposition: [TOKENS] tokens for breaking down complex tasks\n\nTotal: 8000 tokens\n</budget_request>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>\n\n<budget_report>\nToken usage:\n- thinking: [USED]/[ALLOCATED] tokens ([PERCENTAGE]%)\n- facts: [USED]/[ALLOCATED] tokens ([PERCENTAGE]%)\n- cognition: [USED]/[ALLOCATED] tokens ([PERCENTAGE]%)\n- answer: [USED]/[ALLOCATED] tokens ([PERCENTAGE]%)\n- task_decomposition: [USED]/[ALLOCATED] tokens ([PERCENTAGE]%)\n\nTotal efficiency: [EFFICIENCY]%\nRemaining budget: [REMAINING] tokens\n</budget_report>"
         
         # Always use streaming for better user experience and real-time processing
         print("\n=== Streaming Response ===\n")
@@ -3230,36 +3327,71 @@ class R1Agent:
         
         streamed_response = []
         current_section = None
-        token_request_pattern = r"<request_tokens>\s*(\w+):\s*(\d+)\s*</request_tokens>"
-        budget_status_pattern = r"<budget_status/>"
+        budget_request_pattern = r"<budget_request>(.*?)</budget_request>"
+        budget_report_pattern = r"<budget_report>(.*?)</budget_report>"
+        section_pattern = r"<(\w+)>(.*?)</\1>"
+        
+        # Track budget allocation and usage
+        budget_allocation = {}
+        budget_usage = {}
+        total_budget = 8000
+        remaining_budget = total_budget
+        budget_requested = False
         
         for chunk in response_stream:
             token = chunk.choices[0].delta.content
             if token:
                 streamed_response.append(token)
+                full_text = "".join(streamed_response)
                 
-                # Check for token requests
-                if "<request_tokens>" in token:
-                    # Extract the full token request when it's complete
-                    full_text = "".join(streamed_response)
-                    matches = re.findall(token_request_pattern, full_text)
-                    for operation, amount_str in matches:
-                        try:
-                            amount = int(amount_str)
-                            success, granted = self.token_budget.request_tokens(operation, amount)
-                            if success:
-                                print(f"\n[TokenBudget] Granted {granted} tokens for {operation}")
-                                current_section = operation
-                            else:
-                                print(f"\n[TokenBudget] Request denied for {amount} tokens for {operation} - insufficient budget")
-                        except ValueError:
-                            print(f"\n[TokenBudget] Invalid token request format: {operation}:{amount_str}")
+                # Check for budget request
+                if "<budget_request>" in full_text and "</budget_request>" in full_text and not budget_requested:
+                    budget_requested = True
+                    budget_match = re.search(budget_request_pattern, full_text, re.DOTALL)
+                    if budget_match:
+                        budget_text = budget_match.group(1)
+                        print(f"\n=== Budget Request ===\n{budget_text}\n======================\n")
+                        
+                        # Parse token allocations
+                        allocation_matches = re.findall(r"- (\w+): (\d+) tokens", budget_text)
+                        for operation, amount_str in allocation_matches:
+                            try:
+                                amount = int(amount_str)
+                                budget_allocation[operation] = amount
+                                print(f"[Budget] Allocated {amount} tokens for {operation}")
+                            except ValueError:
+                                print(f"[Budget] Invalid allocation format: {operation}:{amount_str}")
                 
-                # Check for budget status requests
-                if budget_status_pattern in token:
-                    budget_status = self.token_budget.get_budget_status()
-                    print(f"\n[TokenBudget] Status: {budget_status['remaining_budget']}/{budget_status['initial_budget']} tokens remaining")
-                    print(f"[TokenBudget] Usage: {budget_status['usage_by_operation']}")
+                # Track current section for budget usage
+                if current_section is None:
+                    for section in ["thinking", "facts", "cognition", "answer"]:
+                        if f"<{section}>" in token:
+                            current_section = section
+                            print(f"\n[Budget] Starting {section} section")
+                            budget_usage[current_section] = 0
+                            break
+                
+                # Check for section end
+                if current_section and f"</{current_section}>" in token:
+                    allocated = budget_allocation.get(current_section, 0)
+                    used = budget_usage.get(current_section, 0)
+                    efficiency = (used / allocated * 100) if allocated > 0 else 0
+                    print(f"[Budget] Completed {current_section}: used {used}/{allocated} tokens ({efficiency:.1f}%)")
+                    
+                    # Update remaining budget
+                    remaining_budget -= used
+                    current_section = None
+                
+                # Count tokens in current section
+                if current_section:
+                    # Estimate token count for this chunk
+                    token_count = 1  # Simple approximation
+                    budget_usage[current_section] = budget_usage.get(current_section, 0) + token_count
+                
+                # Check for budget report
+                if "<budget_report>" in token:
+                    print(f"\n[Budget] Generating final budget report")
+                    print(f"[Budget] Remaining budget: {remaining_budget} tokens")
                 
                 # Print the token
                 print(token, end='', flush=True)
@@ -3324,58 +3456,48 @@ class R1Agent:
             description=user_input
         )
         
-        # Request tokens for task decomposition
-        decomp_tokens_requested = 1500
-        success, granted_tokens = self.token_budget.request_tokens("task_decomposition", decomp_tokens_requested)
+        # Check budget allocation for task decomposition
+        decomp_tokens_allocated = budget_allocation.get("task_decomposition", 1500)
         
-        if success:
-            # Always decompose tasks with streaming output
-            print(f"\n=== Task Decomposition (Streaming) - Budget: {granted_tokens} tokens ===\n")
-            
-            # Create a decomposition request with enhanced instructions and token budget awareness
-            decomp_messages = [
-                {"role": "system", "content": f"You are an expert task decomposition system with a token budget of {granted_tokens} tokens. Break down complex tasks into logical subtasks with clear dependencies and execution steps. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), approach (string describing overall approach), and execution_steps (array of strings describing how to execute each subtask)."},
-                {"role": "user", "content": f"Decompose this task into detailed subtasks with execution steps: {user_input}"}
-            ]
-            
-            # Stream the decomposition process
-            decomp_stream = self.client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-R1",
-                messages=decomp_messages,
-                temperature=0.7,
-                max_tokens=granted_tokens,
-                stream=True
-            )
-            
-            decomp_chunks = []
-            for chunk in decomp_stream:
-                token = chunk.choices[0].delta.content
-                if token:
-                    decomp_chunks.append(token)
-                    print(token, end='', flush=True)
-            
-            print("\n\n=========================\n")
-            
-            decomp_text = "".join(decomp_chunks)
-            
-            # Count actual tokens used and adjust budget
-            actual_tokens_used = self.token_budget.count_tokens(decomp_text)
-            if actual_tokens_used < granted_tokens:
-                tokens_to_return = granted_tokens - actual_tokens_used
-                self.token_budget.add_to_budget(tokens_to_return)
-                print(f"[TokenBudget] Returned {tokens_to_return} unused tokens to budget")
-        else:
-            print("\n=== Task Decomposition - Insufficient Budget ===\n")
-            print("Unable to perform detailed task decomposition due to token budget constraints.")
-            print("Using simplified decomposition approach instead.")
-            
-            # Use a simplified approach that doesn't require LLM calls
-            decomp_text = json.dumps({
-                "subtasks": [{"description": f"Process task: {user_input}"}],
-                "dependencies": {},
-                "approach": "Direct processing due to budget constraints",
-                "execution_steps": ["Process task with available resources"]
-            })
+        # Always decompose tasks with streaming output
+        print(f"\n=== Task Decomposition (Streaming) - Budget: {decomp_tokens_allocated} tokens ===\n")
+        
+        # Create a decomposition request with enhanced instructions and budget awareness
+        decomp_messages = [
+            {"role": "system", "content": f"You are an expert task decomposition system with a token budget of {decomp_tokens_allocated} tokens. Break down complex tasks into logical subtasks with clear dependencies and execution steps. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), approach (string describing overall approach), and execution_steps (array of strings describing how to execute each subtask)."},
+            {"role": "user", "content": f"Decompose this task into detailed subtasks with execution steps: {user_input}"}
+        ]
+        
+        # Stream the decomposition process
+        decomp_stream = self.client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1",
+            messages=decomp_messages,
+            temperature=0.7,
+            max_tokens=decomp_tokens_allocated,
+            stream=True
+        )
+        
+        decomp_chunks = []
+        decomp_tokens_used = 0
+        for chunk in decomp_stream:
+            token = chunk.choices[0].delta.content
+            if token:
+                decomp_chunks.append(token)
+                print(token, end='', flush=True)
+                decomp_tokens_used += 1  # Simple approximation
+        
+        print("\n\n=========================\n")
+        
+        decomp_text = "".join(decomp_chunks)
+        
+        # Update budget usage for task decomposition
+        budget_usage["task_decomposition"] = decomp_tokens_used
+        remaining_budget -= decomp_tokens_used
+        
+        # Report task decomposition efficiency
+        decomp_efficiency = (decomp_tokens_used / decomp_tokens_allocated * 100) if decomp_tokens_allocated > 0 else 0
+        print(f"[Budget] Task decomposition: used {decomp_tokens_used}/{decomp_tokens_allocated} tokens ({decomp_efficiency:.1f}%)")
+        print(f"[Budget] Remaining budget: {remaining_budget} tokens")
         
         # Parse the JSON response
         import json
@@ -3469,14 +3591,25 @@ class R1Agent:
         # 7) Process cognitive behaviors from the structured response
         self._process_cognitive_behaviors_from_structured(structured_response, meta_task.task_id)
         
-        # 8) Perform chain-of-thought enrichment
-        enriched_answer = self._perform_cot_enrichment_from_structured(structured_response)
-        
-        # Add enriched answer to knowledge base
-        self.knowledge_base.add_fact(f"enriched_answer_{meta_task.task_id}", enriched_answer)
-        print("\n=== Enriched Answer ===\n")
-        print(enriched_answer)
-        print("\n=========================\n")
+        # 8) Perform chain-of-thought enrichment with budget awareness
+        enrichment_tokens = min(1000, remaining_budget)  # Allocate remaining budget, up to 1000 tokens
+        if enrichment_tokens > 100:  # Only if we have enough tokens left
+            print(f"[Budget] Allocating {enrichment_tokens} tokens for answer enrichment")
+            enriched_answer = self._perform_cot_enrichment_from_structured(structured_response)
+            
+            # Add enriched answer to knowledge base
+            self.knowledge_base.add_fact(f"enriched_answer_{meta_task.task_id}", enriched_answer)
+            print("\n=== Enriched Answer ===\n")
+            print(enriched_answer)
+            print("\n=========================\n")
+            
+            # Update budget
+            enrichment_tokens_used = min(self.token_budget.count_tokens(enriched_answer), enrichment_tokens)
+            remaining_budget -= enrichment_tokens_used
+            budget_usage["enrichment"] = enrichment_tokens_used
+            print(f"[Budget] Answer enrichment: used {enrichment_tokens_used}/{enrichment_tokens} tokens")
+        else:
+            print("[Budget] Insufficient tokens for answer enrichment")
         
         # Add chain-of-thought step to cognitive model
         self.cognitive_engine.add_reasoning_step(
@@ -3498,6 +3631,19 @@ class R1Agent:
         # 10) Log the cognitive reasoning trace
         reasoning_summary = self.cognitive_engine.get_reasoning_summary()
         logger.info(f"[R1Agent] Cognitive reasoning trace:\n{reasoning_summary}")
+        
+        # 11) Generate final budget report
+        print("\n=== Final Budget Report ===")
+        print(f"Initial budget: 8000 tokens")
+        total_used = sum(budget_usage.values())
+        print(f"Total tokens used: {total_used} ({total_used/8000*100:.1f}%)")
+        print(f"Remaining budget: {remaining_budget} tokens")
+        print("Usage by operation:")
+        for operation, tokens in budget_usage.items():
+            allocated = budget_allocation.get(operation, 0)
+            efficiency = (tokens / allocated * 100) if allocated > 0 else 0
+            print(f"  {operation}: {tokens}/{allocated} tokens ({efficiency:.1f}%)")
+        print("=========================\n")
 
         return full_text
         
@@ -3828,7 +3974,7 @@ def main():
             deadline=time.time() + 86400*30,  # 30 days from now
             success_criteria=["Process at least 100 tasks", "Maintain 95% task success rate", 
                              "Demonstrate effective task decomposition with structured outputs",
-                             "Efficiently manage token budget across operations"]
+                             "Develop emergent budgeting capabilities to optimize token usage"]
         )
         logger.info(f"Created new goal: {g}")
         
@@ -3849,15 +3995,16 @@ def main():
         
         # Add budget management goal
         budget_goal = agent.add_goal(
-            name="TokenEfficiency",
-            description="Efficiently manage token budget to maximize value of outputs.",
+            name="EmergentBudgeting",
+            description="Develop emergent budgeting capabilities to optimize token usage.",
             priority=2,
             deadline=time.time() + 86400*30,  # 30 days from now
-            success_criteria=["Maintain token usage within budget constraints", 
-                             "Prioritize high-value operations when budget is limited",
-                             "Demonstrate economic reasoning in token allocation"]
+            success_criteria=["Learn optimal token allocation patterns", 
+                             "Improve budget efficiency metrics over time",
+                             "Demonstrate economic reasoning in token allocation",
+                             "Adapt allocations based on task complexity"]
         )
-        logger.info(f"Created token budget goal: {budget_goal}")
+        logger.info(f"Created emergent budgeting goal: {budget_goal}")
 
         while True:
             # Add status check using cognitive verification
