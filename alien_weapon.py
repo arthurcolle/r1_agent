@@ -29,6 +29,7 @@ import subprocess
 import requests
 import random
 import numpy as np
+import tiktoken
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Literal, TypeVar, Generic
 from pydantic import BaseModel, Field, validator, root_validator
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -47,6 +48,106 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("UltraAdvancedR1Agent")
+
+###############################################################################
+# TOKEN BUDGET MANAGEMENT
+###############################################################################
+
+class TokenBudget:
+    """
+    Manages a token budget for the agent, tracking usage and enforcing limits.
+    
+    Attributes:
+        initial_budget (int): The starting token budget
+        remaining_budget (int): Current remaining tokens
+        usage_history (Dict[str, int]): History of token usage by operation
+        encoding (tiktoken.Encoding): The encoding used for token counting
+    """
+    def __init__(self, initial_budget: int = 8000):
+        self.initial_budget = initial_budget
+        self.remaining_budget = initial_budget
+        self.usage_history = {}
+        self._lock = threading.Lock()
+        
+        # Try to load tiktoken encoding, fall back to character-based estimation
+        try:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+            self.token_counting_method = "tiktoken"
+        except (ImportError, ValueError):
+            self.encoding = None
+            self.token_counting_method = "character_estimate"
+            logger.warning("[TokenBudget] tiktoken not available, using character-based token estimation")
+    
+    def count_tokens(self, text: str) -> int:
+        """Count the number of tokens in a text string"""
+        if self.token_counting_method == "tiktoken":
+            return len(self.encoding.encode(text))
+        else:
+            # Fallback: estimate tokens as words/4 (very rough approximation)
+            return len(text.split()) // 4 + 1
+    
+    def request_tokens(self, operation: str, amount: int) -> Tuple[bool, int]:
+        """
+        Request tokens for an operation.
+        
+        Args:
+            operation: Name of the operation requesting tokens
+            amount: Number of tokens requested
+            
+        Returns:
+            Tuple of (success, granted_amount)
+        """
+        with self._lock:
+            if amount <= 0:
+                return False, 0
+                
+            # If we have enough budget, grant the full request
+            if amount <= self.remaining_budget:
+                self.remaining_budget -= amount
+                self._record_usage(operation, amount)
+                return True, amount
+                
+            # If we don't have enough, grant what we have left
+            if self.remaining_budget > 0:
+                granted = self.remaining_budget
+                self.remaining_budget = 0
+                self._record_usage(operation, granted)
+                return True, granted
+                
+            # No budget left
+            return False, 0
+    
+    def _record_usage(self, operation: str, amount: int) -> None:
+        """Record token usage for an operation"""
+        if operation in self.usage_history:
+            self.usage_history[operation] += amount
+        else:
+            self.usage_history[operation] = amount
+    
+    def get_budget_status(self) -> Dict[str, Any]:
+        """Get the current budget status"""
+        with self._lock:
+            return {
+                "initial_budget": self.initial_budget,
+                "remaining_budget": self.remaining_budget,
+                "used_budget": self.initial_budget - self.remaining_budget,
+                "usage_by_operation": self.usage_history.copy(),
+                "token_counting_method": self.token_counting_method
+            }
+    
+    def add_to_budget(self, amount: int) -> int:
+        """Add tokens to the budget (e.g., for rewards or budget increases)"""
+        with self._lock:
+            self.remaining_budget += amount
+            return self.remaining_budget
+    
+    def reset_budget(self, new_budget: Optional[int] = None) -> None:
+        """Reset the budget to initial value or a new specified amount"""
+        with self._lock:
+            if new_budget is not None:
+                self.initial_budget = new_budget
+            self.remaining_budget = self.initial_budget
+            self.usage_history = {}
 
 ###############################################################################
 # DATA STRUCTURES FOR TASK MANAGEMENT
@@ -3049,6 +3150,17 @@ class R1Agent:
         self.knowledge_base.add_fact("backward_chaining",
             "A cognitive behavior where the agent starts from the goal and works backwards to determine steps."
         )
+        
+        # Add token budget knowledge
+        self.knowledge_base.add_fact("token budget",
+            "A limited resource of tokens (initially 8000) that must be requested and managed across different operations."
+        )
+        self.knowledge_base.add_fact("token economy",
+            "The practice of efficiently allocating limited token resources to maximize value and utility of outputs."
+        )
+        self.knowledge_base.add_fact("budget planning",
+            "The process of allocating tokens across different phases (thinking, response generation, etc.) based on priorities."
+        )
 
     def add_goal(self, name: str, description: str, priority: int = 5, 
                 deadline: Optional[float] = None, 
@@ -3064,7 +3176,7 @@ class R1Agent:
         checks for do_anything calls, spawns a meta-task from user input.
         Uses structured output format and chain-of-thought reasoning.
         Enhanced with cognitive modeling for structured outputs and proactive problem-solving.
-        Now with streaming output for all LLM generation.
+        Now with streaming output for all LLM generation and token budget management.
         """
         # 1) Add user message
         self.conversation.add_user_utterance(user_input)
@@ -3087,9 +3199,9 @@ class R1Agent:
             confidence=0.8
         )
         
-        # Add structured output format instruction with cognitive behaviors
+        # Add structured output format instruction with cognitive behaviors and token budget
         structured_prompt = messages.copy()
-        structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
+        structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<request_tokens> thinking: 2000 </request_tokens>\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<request_tokens> facts: 500 </request_tokens>\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<request_tokens> cognition: 500 </request_tokens>\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<request_tokens> answer: 1000 </request_tokens>\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>\n\n<budget_status/>"
         
         # Always use streaming for better user experience and real-time processing
         print("\n=== Streaming Response ===\n")
@@ -3105,10 +3217,39 @@ class R1Agent:
         )
         
         streamed_response = []
+        current_section = None
+        token_request_pattern = r"<request_tokens>\s*(\w+):\s*(\d+)\s*</request_tokens>"
+        budget_status_pattern = r"<budget_status/>"
+        
         for chunk in response_stream:
             token = chunk.choices[0].delta.content
             if token:
                 streamed_response.append(token)
+                
+                # Check for token requests
+                if "<request_tokens>" in token:
+                    # Extract the full token request when it's complete
+                    full_text = "".join(streamed_response)
+                    matches = re.findall(token_request_pattern, full_text)
+                    for operation, amount_str in matches:
+                        try:
+                            amount = int(amount_str)
+                            success, granted = self.token_budget.request_tokens(operation, amount)
+                            if success:
+                                print(f"\n[TokenBudget] Granted {granted} tokens for {operation}")
+                                current_section = operation
+                            else:
+                                print(f"\n[TokenBudget] Request denied for {amount} tokens for {operation} - insufficient budget")
+                        except ValueError:
+                            print(f"\n[TokenBudget] Invalid token request format: {operation}:{amount_str}")
+                
+                # Check for budget status requests
+                if budget_status_pattern in token:
+                    budget_status = self.token_budget.get_budget_status()
+                    print(f"\n[TokenBudget] Status: {budget_status['remaining_budget']}/{budget_status['initial_budget']} tokens remaining")
+                    print(f"[TokenBudget] Usage: {budget_status['usage_by_operation']}")
+                
+                # Print the token
                 print(token, end='', flush=True)
                 
                 # Process token through registry for potential code execution
@@ -3120,6 +3261,14 @@ class R1Agent:
         self.function_adapter.token_registry.clear_buffer()
         
         full_text = "".join(streamed_response)
+        
+        # Count tokens in the response and record usage
+        response_tokens = self.token_budget.count_tokens(full_text)
+        self.token_budget.request_tokens("response_total", response_tokens)
+        
+        # Print final budget status
+        budget_status = self.token_budget.get_budget_status()
+        print(f"[TokenBudget] Final status: {budget_status['remaining_budget']}/{budget_status['initial_budget']} tokens remaining")
         
         # Extract structured components from the text response
         facts, thinking, cognition, answer = self._extract_structured_output(full_text)
@@ -3163,34 +3312,58 @@ class R1Agent:
             description=user_input
         )
         
-        # Always decompose tasks with streaming output
-        print("\n=== Task Decomposition (Streaming) ===\n")
+        # Request tokens for task decomposition
+        decomp_tokens_requested = 1500
+        success, granted_tokens = self.token_budget.request_tokens("task_decomposition", decomp_tokens_requested)
         
-        # Create a decomposition request with enhanced instructions
-        decomp_messages = [
-            {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks with clear dependencies and execution steps. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), approach (string describing overall approach), and execution_steps (array of strings describing how to execute each subtask)."},
-            {"role": "user", "content": f"Decompose this task into detailed subtasks with execution steps: {user_input}"}
-        ]
-        
-        # Stream the decomposition process
-        decomp_stream = self.client.chat.completions.create(
-            model="deepseek-ai/DeepSeek-R1",
-            messages=decomp_messages,
-            temperature=0.7,
-            max_tokens=1500,
-            stream=True
-        )
-        
-        decomp_chunks = []
-        for chunk in decomp_stream:
-            token = chunk.choices[0].delta.content
-            if token:
-                decomp_chunks.append(token)
-                print(token, end='', flush=True)
-        
-        print("\n\n=========================\n")
-        
-        decomp_text = "".join(decomp_chunks)
+        if success:
+            # Always decompose tasks with streaming output
+            print(f"\n=== Task Decomposition (Streaming) - Budget: {granted_tokens} tokens ===\n")
+            
+            # Create a decomposition request with enhanced instructions and token budget awareness
+            decomp_messages = [
+                {"role": "system", "content": f"You are an expert task decomposition system with a token budget of {granted_tokens} tokens. Break down complex tasks into logical subtasks with clear dependencies and execution steps. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), approach (string describing overall approach), and execution_steps (array of strings describing how to execute each subtask)."},
+                {"role": "user", "content": f"Decompose this task into detailed subtasks with execution steps: {user_input}"}
+            ]
+            
+            # Stream the decomposition process
+            decomp_stream = self.client.chat.completions.create(
+                model="deepseek-ai/DeepSeek-R1",
+                messages=decomp_messages,
+                temperature=0.7,
+                max_tokens=granted_tokens,
+                stream=True
+            )
+            
+            decomp_chunks = []
+            for chunk in decomp_stream:
+                token = chunk.choices[0].delta.content
+                if token:
+                    decomp_chunks.append(token)
+                    print(token, end='', flush=True)
+            
+            print("\n\n=========================\n")
+            
+            decomp_text = "".join(decomp_chunks)
+            
+            # Count actual tokens used and adjust budget
+            actual_tokens_used = self.token_budget.count_tokens(decomp_text)
+            if actual_tokens_used < granted_tokens:
+                tokens_to_return = granted_tokens - actual_tokens_used
+                self.token_budget.add_to_budget(tokens_to_return)
+                print(f"[TokenBudget] Returned {tokens_to_return} unused tokens to budget")
+        else:
+            print("\n=== Task Decomposition - Insufficient Budget ===\n")
+            print("Unable to perform detailed task decomposition due to token budget constraints.")
+            print("Using simplified decomposition approach instead.")
+            
+            # Use a simplified approach that doesn't require LLM calls
+            decomp_text = json.dumps({
+                "subtasks": [{"description": f"Process task: {user_input}"}],
+                "dependencies": {},
+                "approach": "Direct processing due to budget constraints",
+                "execution_steps": ["Process task with available resources"]
+            })
         
         # Parse the JSON response
         import json
@@ -3442,6 +3615,9 @@ class R1Agent:
         if answer_match:
             answer = answer_match.group(1).strip()
             
+        # Extract token requests
+        token_requests = re.findall(r"<request_tokens>\s*(\w+):\s*(\d+)\s*</request_tokens>", text)
+        
         return facts, thinking, cognition, answer
         
     def _perform_cot_enrichment_from_structured(self, response: FactsThinkingAnswer) -> str:
@@ -3627,6 +3803,7 @@ def main():
      - The background threads keep processing tasks, plan manager keeps analyzing, etc.
      - Uses structured outputs with Pydantic models for better task decomposition and reasoning
      - Exhibits volition and goal-seeking behavior through proactive problem-solving
+     - Manages token budget with economic reasoning
     """
     agent = R1Agent()
 
@@ -3638,7 +3815,8 @@ def main():
             priority=1,
             deadline=time.time() + 86400*30,  # 30 days from now
             success_criteria=["Process at least 100 tasks", "Maintain 95% task success rate", 
-                             "Demonstrate effective task decomposition with structured outputs"]
+                             "Demonstrate effective task decomposition with structured outputs",
+                             "Efficiently manage token budget across operations"]
         )
         logger.info(f"Created new goal: {g}")
         
@@ -3656,6 +3834,18 @@ def main():
             is_correct=True,
             confidence=0.95
         )
+        
+        # Add budget management goal
+        budget_goal = agent.add_goal(
+            name="TokenEfficiency",
+            description="Efficiently manage token budget to maximize value of outputs.",
+            priority=2,
+            deadline=time.time() + 86400*30,  # 30 days from now
+            success_criteria=["Maintain token usage within budget constraints", 
+                             "Prioritize high-value operations when budget is limited",
+                             "Demonstrate economic reasoning in token allocation"]
+        )
+        logger.info(f"Created token budget goal: {budget_goal}")
 
         while True:
             # Add status check using cognitive verification
@@ -3701,6 +3891,33 @@ def main():
                 for goal in goals:
                     print(f"Goal {goal.goal_id}: {goal.name} - {goal.description[:50]}... (Status: {goal.status.value}, Progress: {goal.progress:.2f})")
                 print("\n=====================\n")
+                continue
+                
+            if user_text.lower() == "show budget":
+                budget_status = agent.token_budget.get_budget_status()
+                print("\n=== Token Budget Status ===\n")
+                print(f"Initial budget: {budget_status['initial_budget']} tokens")
+                print(f"Remaining budget: {budget_status['remaining_budget']} tokens")
+                print(f"Used budget: {budget_status['used_budget']} tokens")
+                print("\nUsage by operation:")
+                for operation, tokens in budget_status['usage_by_operation'].items():
+                    print(f"  {operation}: {tokens} tokens")
+                print(f"\nToken counting method: {budget_status['token_counting_method']}")
+                print("\n===========================\n")
+                continue
+                
+            if user_text.lower().startswith("add budget"):
+                try:
+                    amount = int(user_text.split()[2])
+                    new_budget = agent.token_budget.add_to_budget(amount)
+                    print(f"\n[TokenBudget] Added {amount} tokens. New budget: {new_budget} tokens\n")
+                except (IndexError, ValueError):
+                    print("\n[TokenBudget] Usage: add budget <amount>\n")
+                continue
+                
+            if user_text.lower() == "reset budget":
+                agent.token_budget.reset_budget()
+                print(f"\n[TokenBudget] Budget reset to {agent.token_budget.initial_budget} tokens\n")
                 continue
                 
             if user_text.lower() == "solve puzzle":
