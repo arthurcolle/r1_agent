@@ -2243,8 +2243,10 @@ class R1Agent:
             "A cognitive behavior where the agent starts from the goal and works backwards to determine steps."
         )
 
-    def add_goal(self, name: str, description: str, priority: int = 5) -> Goal:
-        return self.goal_manager.create_goal(name, description, priority)
+    def add_goal(self, name: str, description: str, priority: int = 5, 
+                deadline: Optional[float] = None, 
+                success_criteria: Optional[List[str]] = None) -> Goal:
+        return self.goal_manager.create_goal(name, description, priority, deadline, success_criteria)
 
     def update_goal_status(self, goal_id: int, status: str) -> None:
         self.goal_manager.update_goal_status(goal_id, status)
