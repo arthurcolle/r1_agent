@@ -1644,6 +1644,38 @@ class InMemoryCodeArchive:
         self._snippets: Dict[str, str] = {}
         self._lock = threading.Lock()
     
+    def intelligent_modify_snippet(self, snippet_name: str, instructions: str) -> None:
+        """
+        Apply advanced transformations to a snippet using a chain-of-thought approach.
+        """
+        with self._lock:
+            if snippet_name not in self._snippets:
+                logger.warning(f"[InMemoryCodeArchive] Snippet '{snippet_name}' does not exist.")
+                return
+            original_code = self._snippets[snippet_name]
+            # Here you can parse instructions, implement chain-of-thought transformations, etc.
+            # For demonstration, we'll do a simple example that does find/replace lines indicated in instructions.
+            new_code = self._apply_transformations(original_code, instructions)
+            self._snippets[snippet_name] = new_code
+            logger.info(f"[InMemoryCodeArchive] Applied intelligent modifications to snippet '{snippet_name}'")
+
+    def _apply_transformations(self, code: str, instructions: str) -> str:
+        """
+        A naive parser that tries to parse instructions for find/replace lines.
+        """
+        try:
+            import re
+            lines = instructions.strip().split("\\n")
+            for line in lines:
+                match = re.match(r"^REPLACE:\\s*'(.*?)'\\s*->\\s*'(.*?)'", line)
+                if match:
+                    old_text, new_text = match.group(1), match.group(2)
+                    code = code.replace(old_text, new_text)
+            return code
+        except Exception as e:
+            logger.error(f"[InMemoryCodeArchive] Error applying transformations: {e}")
+            return code
+    
     def read_from_file(self, filepath: str) -> None:
         """Read code from a file and store it as a snippet."""
         try:
