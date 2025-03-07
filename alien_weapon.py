@@ -3288,6 +3288,9 @@ class R1Agent:
         Enhanced with cognitive modeling for structured outputs and proactive problem-solving.
         Now with streaming output for all LLM generation and token budget management.
         """
+        # Import re module to ensure it's available in this method
+        import re
+        
         # 1) Add user message
         self.conversation.add_user_utterance(user_input)
         
