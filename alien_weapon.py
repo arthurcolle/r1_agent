@@ -1639,10 +1639,10 @@ def get_weather(location):
 # Call the function with the extracted location
 result = get_weather("{location}")
 print(f"Weather in {{location}}:")
-print(f"Temperature: {{{{result['temperature']}}}")
-print(f"Conditions: {{{{result['conditions']}}}")
-print(f"Humidity: {{{{result['humidity']}}}")
-print(f"Wind: {{{{result['wind']}}}")
+print(f"Temperature: {{result['temperature']}}")
+print(f"Conditions: {{result['conditions']}}")
+print(f"Humidity: {{result['humidity']}}")
+print(f"Wind: {{result['wind']}}")
 
 # Return the result
 result
