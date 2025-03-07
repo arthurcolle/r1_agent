@@ -1591,42 +1591,42 @@ import json
 def get_weather(location):
     try:
         # Try to use a weather API that doesn't require authentication
-        url = f"https://wttr.in/{location}?format=j1"
+        url = f"https://wttr.in/{{location}}?format=j1"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
             
             # Extract relevant information
-            current_condition = data.get('current_condition', [{}])[0]
+            current_condition = data.get('current_condition', [{{}}])[0]
             temp_c = current_condition.get('temp_C', 'N/A')
             temp_f = current_condition.get('temp_F', 'N/A')
-            weather_desc = current_condition.get('weatherDesc', [{}])[0].get('value', 'N/A')
+            weather_desc = current_condition.get('weatherDesc', [{{}}])[0].get('value', 'N/A')
             humidity = current_condition.get('humidity', 'N/A')
             wind_speed = current_condition.get('windspeedKmph', 'N/A')
             
-            result = {{
+            result = {{{{
                 "location": location,
-                "temperature": f"{{temp_f}}°F ({{temp_c}}°C)",
+                "temperature": f"{{{{temp_f}}}}°F ({{{{temp_c}}}}°C)",
                 "conditions": weather_desc,
-                "humidity": f"{{humidity}}%",
-                "wind": f"{{wind_speed}} km/h"
-            }}
+                "humidity": f"{{{{humidity}}}}%",
+                "wind": f"{{{{wind_speed}}}} km/h"
+            }}}}
             
             return result
         else:
             # Fallback to a mock response if the API call fails
-            return {{
+            return {{{{
                 "location": location,
                 "temperature": "65°F (18°C)",
                 "conditions": "Partly Cloudy",
                 "humidity": "70%",
                 "wind": "10 km/h",
                 "note": "This is estimated data as the API request failed."
-            }}
+            }}}}
     except Exception as e:
         # Provide a mock response if any error occurs
-        return {{
+        return {{{{
             "location": location,
             "temperature": "65°F (18°C)",
             "conditions": "Partly Cloudy",
@@ -1634,15 +1634,15 @@ def get_weather(location):
             "wind": "10 km/h",
             "error": str(e),
             "note": "This is estimated data due to an error in the API request."
-        }}
+        }}}}
 
 # Call the function with the extracted location
 result = get_weather("{location}")
-print(f"Weather in {location}:")
-print(f"Temperature: {{result['temperature']}}")
-print(f"Conditions: {{result['conditions']}}")
-print(f"Humidity: {{result['humidity']}}")
-print(f"Wind: {{result['wind']}}")
+print(f"Weather in {{location}}:")
+print(f"Temperature: {{{{result['temperature']}}}")
+print(f"Conditions: {{{{result['conditions']}}}")
+print(f"Humidity: {{{{result['humidity']}}}")
+print(f"Wind: {{{{result['wind']}}}")
 
 # Return the result
 result
