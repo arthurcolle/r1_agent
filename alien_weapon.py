@@ -37,6 +37,7 @@ from enum import Enum, auto
 from typing_extensions import Annotated
 from pydantic import BaseModel, Field, create_model, ConfigDict
 from together import Together
+from datetime import datetime
 
 ###############################################################################
 # GLOBAL CONFIG / LOGGING
@@ -3315,6 +3316,11 @@ class R1Agent:
         # Always use streaming for better user experience and real-time processing
         print("\n=== Streaming Response ===\n")
         
+        # Define regex patterns for parsing structured output
+        budget_request_pattern = r"<budget_request>(.*?)</budget_request>"
+        budget_report_pattern = r"<budget_report>(.*?)</budget_report>"
+        section_pattern = r"<(\w+)>(.*?)</\1>"
+        
         # Stream the response
         response_stream = self.client.chat.completions.create(
             model="deepseek-ai/DeepSeek-R1",
@@ -3327,9 +3333,6 @@ class R1Agent:
         
         streamed_response = []
         current_section = None
-        budget_request_pattern = r"<budget_request>(.*?)</budget_request>"
-        budget_report_pattern = r"<budget_report>(.*?)</budget_report>"
-        section_pattern = r"<(\w+)>(.*?)</\1>"
         
         # Track budget allocation and usage
         budget_allocation = {}
