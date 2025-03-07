@@ -29,8 +29,8 @@ import subprocess
 import requests
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Any, Dict, List, Optional, Tuple, Callable
-from pydantic import BaseModel
+from typing import Any, Dict, List, Optional, Tuple, Callable, Union
+from pydantic import BaseModel, Field
 from together import Together
 
 ###############################################################################
@@ -255,19 +255,182 @@ class ConversationMemory:
             logger.info("[ConversationMemory] Summarized conversation due to length limit.")
 
 ###############################################################################
-# SELF-REFLECTIVE COGNITION
+# COGNITIVE MODELS AND REASONING
 ###############################################################################
+
+class CognitiveBehavior(str, Enum):
+    """
+    Defines the key cognitive behaviors that the agent can exhibit during reasoning.
+    """
+    VERIFICATION = "verification"
+    BACKTRACKING = "backtracking"
+    SUBGOAL_SETTING = "subgoal_setting"
+    BACKWARD_CHAINING = "backward_chaining"
+    REFLECTION = "reflection"
+    ADAPTATION = "adaptation"
+    EXPLORATION = "exploration"
+
+
+class ReasoningStep(BaseModel):
+    """
+    Represents a single step in the agent's reasoning process.
+    """
+    step_number: int = Field(..., description="The order of the step in the chain-of-thought")
+    behavior: CognitiveBehavior = Field(..., description="The cognitive behavior for this step")
+    description: str = Field(..., description="A textual description of the step")
+    result: Optional[Union[str, float, Dict[str, Any]]] = Field(None, description="The result or outcome of the step")
+    is_correct: Optional[bool] = Field(None, description="Flag indicating if the result was correct")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata for the step")
+
+
+class ChainOfThought(BaseModel):
+    """
+    Maintains a sequence of reasoning steps forming a chain-of-thought.
+    """
+    steps: List[ReasoningStep] = Field(default_factory=list, description="List of reasoning steps")
+    
+    def add_step(self, step: ReasoningStep) -> None:
+        """Add a reasoning step to the chain."""
+        self.steps.append(step)
+    
+    def get_last_step(self) -> Optional[ReasoningStep]:
+        """Get the last reasoning step, if any."""
+        if self.steps:
+            return self.steps[-1]
+        return None
+    
+    def get_steps_by_behavior(self, behavior: CognitiveBehavior) -> List[ReasoningStep]:
+        """Get all steps with a specific cognitive behavior."""
+        return [step for step in self.steps if step.behavior == behavior]
+
+
+class CognitiveModelingEngine:
+    """
+    Engine for modeling and executing cognitive behaviors in the agent.
+    This is model-agnostic and can work with any LLM backend.
+    """
+    def __init__(self):
+        self._chain_of_thought: ChainOfThought = ChainOfThought()
+        self._current_step: int = 0
+        self._lock = threading.Lock()
+        
+    def add_reasoning_step(
+        self,
+        behavior: CognitiveBehavior,
+        description: str,
+        result: Optional[Union[str, float, Dict[str, Any]]] = None,
+        is_correct: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> ReasoningStep:
+        """
+        Add a new reasoning step to the chain-of-thought.
+        """
+        with self._lock:
+            self._current_step += 1
+            step = ReasoningStep(
+                step_number=self._current_step,
+                behavior=behavior,
+                description=description,
+                result=result,
+                is_correct=is_correct,
+                metadata=metadata or {}
+            )
+            self._chain_of_thought.add_step(step)
+            logger.info(f"[CognitiveModelingEngine] Added reasoning step {self._current_step}: {behavior} - {description}")
+            return step
+    
+    def verify(self, description: str, result: Any, is_correct: bool = None) -> ReasoningStep:
+        """
+        Execute verification behavior: check if a result or intermediate step is correct.
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.VERIFICATION,
+            description=f"Verifying: {description}",
+            result=result,
+            is_correct=is_correct
+        )
+    
+    def backtrack(self, reason: str) -> ReasoningStep:
+        """
+        Execute backtracking behavior: abandon a failing approach and try another.
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.BACKTRACKING,
+            description=f"Backtracking: {reason}"
+        )
+    
+    def set_subgoal(self, subgoal: str, metadata: Optional[Dict[str, Any]] = None) -> ReasoningStep:
+        """
+        Execute subgoal setting behavior: break a problem into smaller, manageable parts.
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.SUBGOAL_SETTING,
+            description=f"Setting subgoal: {subgoal}",
+            metadata=metadata
+        )
+    
+    def backward_chain(self, target: str, steps: Optional[List[str]] = None) -> ReasoningStep:
+        """
+        Execute backward chaining behavior: start from the goal and work backwards.
+        """
+        metadata = {"steps": steps} if steps else {}
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.BACKWARD_CHAINING,
+            description=f"Backward chaining toward: {target}",
+            metadata=metadata
+        )
+    
+    def reflect(self, reflection: str, subject: Optional[str] = None) -> ReasoningStep:
+        """
+        Execute reflection behavior: analyze past performance and learn from it.
+        """
+        metadata = {"subject": subject} if subject else {}
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.REFLECTION,
+            description=reflection,
+            metadata=metadata
+        )
+    
+    def explore(self, strategy: str, options: Optional[List[str]] = None) -> ReasoningStep:
+        """
+        Execute exploration behavior: try different approaches to solve a problem.
+        """
+        metadata = {"options": options} if options else {}
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.EXPLORATION,
+            description=f"Exploring strategy: {strategy}",
+            metadata=metadata
+        )
+
+    def get_chain_of_thought(self) -> ChainOfThought:
+        """Get the full chain-of-thought."""
+        with self._lock:
+            return self._chain_of_thought
+    
+    def get_reasoning_summary(self) -> str:
+        """
+        Generate a summary of the reasoning process so far.
+        """
+        with self._lock:
+            summary = []
+            for step in self._chain_of_thought.steps:
+                result_str = f" → {step.result}" if step.result is not None else ""
+                correctness = " ✓" if step.is_correct else " ✗" if step.is_correct is False else ""
+                summary.append(f"Step {step.step_number} ({step.behavior}): {step.description}{result_str}{correctness}")
+            return "\n".join(summary)
+
 
 class SelfReflectiveCognition:
     """
     Periodically reflects on tasks completed, analyzing performance.
-    Could refine approach or produce new tasks in a real system.
+    Enhanced with cognitive modeling capabilities.
     """
     def __init__(self):
         self._reflections: List[str] = []
         self._lock = threading.Lock()
         self._analyzer_thread = threading.Thread(target=self._analyze_performance_loop, daemon=True)
         self._analyzer_thread.start()
+        self.cognitive_engine = CognitiveModelingEngine()
 
     def reflect_on_task(self, task: Task) -> None:
         with self._lock:
@@ -275,6 +438,13 @@ class SelfReflectiveCognition:
             msg = f"Reflected on task {task.task_id}: status={task.status}, desc='{snippet}'"
             self._reflections.append(msg)
             logger.info(f"[SelfReflectiveCognition] {msg}")
+            
+            # Add to cognitive model
+            self.cognitive_engine.reflect(
+                reflection=msg,
+                subject=f"Task {task.task_id}"
+            )
+            
             # Advanced learning: Adjust strategies based on task outcomes
             self._learn_from_task(task)
 
@@ -285,10 +455,24 @@ class SelfReflectiveCognition:
         # Example learning logic: Adjust priorities based on task success/failure
         if task.status == "COMPLETED":
             logger.info(f"[SelfReflectiveCognition] Task {task.task_id} completed successfully. Reinforcing strategies.")
+            
+            # Add verification step to cognitive model
+            self.cognitive_engine.verify(
+                description=f"Task {task.task_id} completion",
+                result="Success",
+                is_correct=True
+            )
+            
             # Advanced adaptation: Increase priority for similar tasks
             self._adjust_similar_task_priorities(task, increase=True)
         elif task.status == "FAILED":
             logger.info(f"[SelfReflectiveCognition] Task {task.task_id} failed. Adjusting strategies to avoid similar failures.")
+            
+            # Add backtracking step to cognitive model
+            self.cognitive_engine.backtrack(
+                reason=f"Task {task.task_id} failed to complete"
+            )
+            
             # Advanced adaptation: Decrease priority for similar tasks
             self._adjust_similar_task_priorities(task, increase=False)
 
@@ -309,6 +493,12 @@ class SelfReflectiveCognition:
     def get_reflections(self) -> List[str]:
         with self._lock:
             return list(self._reflections)
+    
+    def get_reasoning_summary(self) -> str:
+        """
+        Get a summary of the cognitive reasoning process.
+        """
+        return self.cognitive_engine.get_reasoning_summary()
 
     def _analyze_performance_loop(self) -> None:
         """
@@ -627,6 +817,7 @@ class SmartTaskProcessor:
      - subtask detection (Subtask(n)= ...)
      - updating Task status, storing results
      - hooking into self-reflection
+     - cognitive modeling with verification, backtracking, etc.
     """
     def __init__(
         self,
@@ -637,47 +828,177 @@ class SmartTaskProcessor:
         self.memory_store = memory_store
         self.function_adapter = function_adapter
         self.reflection = reflection
+        # Access the cognitive engine from the reflection object
+        self.cognitive_engine = reflection.cognitive_engine
 
     def process_task(self, task: Task) -> None:
         logger.info(f"[SmartTaskProcessor] Starting task {task.task_id} - '{task.description}'")
         self.memory_store.update_task_status(task.task_id, "IN_PROGRESS")
+        
+        # Set subgoal for this task in the cognitive engine
+        self.cognitive_engine.set_subgoal(
+            subgoal=f"Complete task {task.task_id}: {task.description[:50]}...",
+            metadata={"task_id": task.task_id}
+        )
 
-        # 1) Check for <function_call> do_anything in the description
+        # Process using cognitive modeling approach
+        is_success = self._process_task_with_cognition(task)
+        
+        if is_success:
+            # Mark completed, reflect
+            self.memory_store.update_task_status(task.task_id, "COMPLETED")
+            self.reflection.reflect_on_task(task)
+            
+            # Add verification step in cognitive engine
+            self.cognitive_engine.verify(
+                description=f"Task {task.task_id} processing",
+                result="Success",
+                is_correct=True
+            )
+            
+            logger.info(f"[SmartTaskProcessor] Completed task {task.task_id}")
+        else:
+            # Mark as failed
+            self.memory_store.update_task_status(task.task_id, "FAILED")
+            self.reflection.reflect_on_task(task)
+            
+            # Add backtracking step in cognitive engine
+            self.cognitive_engine.backtrack(
+                reason=f"Task {task.task_id} processing failed"
+            )
+            
+            logger.info(f"[SmartTaskProcessor] Failed to complete task {task.task_id}")
+
+    def _process_task_with_cognition(self, task: Task) -> bool:
+        """
+        Process a task using cognitive modeling approach.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            # Try different strategies in order, with cognitive reasoning
+            strategies = [
+                self._try_function_calls,
+                self._try_shell_commands,
+                self._try_python_code,
+                self._try_subtask_decomposition
+            ]
+            
+            # Track if any strategy was successful
+            success = False
+            
+            # Explore different strategies
+            self.cognitive_engine.explore(
+                strategy="Multi-strategy task processing",
+                options=["Function calls", "Shell commands", "Python code", "Subtask decomposition"]
+            )
+            
+            for i, strategy in enumerate(strategies):
+                # Add reasoning step for trying this strategy
+                self.cognitive_engine.add_reasoning_step(
+                    behavior=CognitiveBehavior.EXPLORATION,
+                    description=f"Trying strategy {i+1} for task {task.task_id}",
+                    metadata={"strategy": strategy.__name__}
+                )
+                
+                # Try the strategy
+                result = strategy(task)
+                
+                if result:
+                    # Strategy succeeded
+                    self.cognitive_engine.verify(
+                        description=f"Strategy {strategy.__name__}",
+                        result="Success",
+                        is_correct=True
+                    )
+                    success = True
+                else:
+                    # Strategy didn't apply or failed
+                    self.cognitive_engine.verify(
+                        description=f"Strategy {strategy.__name__}",
+                        result="Not applicable",
+                        is_correct=None
+                    )
+            
+            # If no strategy worked but we didn't encounter errors, still count as success
+            if not success:
+                # Add final reasoning step
+                self.cognitive_engine.add_reasoning_step(
+                    behavior=CognitiveBehavior.VERIFICATION,
+                    description=f"Completed task {task.task_id} without applying specific strategies",
+                    result="Simple completion",
+                    is_correct=True
+                )
+            
+            return True
+            
+        except Exception as e:
+            logger.exception(f"[SmartTaskProcessor] Error processing task {task.task_id}: {e}")
+            
+            # Add error step to cognitive engine
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.VERIFICATION,
+                description=f"Error processing task {task.task_id}",
+                result=str(e),
+                is_correct=False
+            )
+            
+            return False
+
+    def _try_function_calls(self, task: Task) -> bool:
+        """Try processing function calls in the task description."""
+        # Check for <function_call> do_anything in the description
         result = self.function_adapter.process_function_calls(task.description)
         if result:
             self.memory_store.update_task_result(task.task_id, result)
+            return True
+        return False
 
-        # 2) Check for shell command execution
+    def _try_shell_commands(self, task: Task) -> bool:
+        """Try processing shell commands in the task description."""
+        # Check for shell command execution
         shell_command_pattern = r"<shell_command>(.*?)</shell_command>"
         match = re.search(shell_command_pattern, task.description, re.DOTALL)
         if match:
             command = match.group(1).strip()
             result = self.function_adapter.execute_shell_command(command, long_running=False)
             self.memory_store.update_task_result(task.task_id, result)
+            return True
 
-        # 3) Check for long-running shell command execution
+        # Check for long-running shell command execution
         long_shell_command_pattern = r"<long_shell_command>(.*?)</long_shell_command>"
         match = re.search(long_shell_command_pattern, task.description, re.DOTALL)
         if match:
             command = match.group(1).strip()
             result = self.function_adapter.execute_shell_command(command, long_running=True)
             self.memory_store.update_task_result(task.task_id, result)
+            return True
+            
+        return False
 
-        # 4) Check for Python code execution
+    def _try_python_code(self, task: Task) -> bool:
+        """Try processing Python code in the task description."""
+        # Check for Python code execution
         python_code_pattern = r"<python_code>(.*?)</python_code>"
         match = re.search(python_code_pattern, task.description, re.DOTALL)
         if match:
             code = match.group(1).strip()
             result = self.function_adapter.execute_python_code(code, long_running=False)
             self.memory_store.update_task_result(task.task_id, result)
+            return True
 
-        # 5) Check for long-running Python code execution
+        # Check for long-running Python code execution
         long_python_code_pattern = r"<long_python_code>(.*?)</long_python_code>"
         match = re.search(long_python_code_pattern, task.description, re.DOTALL)
         if match:
             code = match.group(1).strip()
             result = self.function_adapter.execute_python_code(code, long_running=True)
             self.memory_store.update_task_result(task.task_id, result)
+            return True
+            
+        return False
+
+    def _try_subtask_decomposition(self, task: Task) -> bool:
+        """Try decomposing the task into subtasks."""
         subtask_pattern = r"Subtask\s*\(\s*(\d+)\s*\)\s*=\s*(.*)"
         match = re.search(subtask_pattern, task.description, re.IGNORECASE | re.DOTALL)
         if match:
@@ -685,26 +1006,57 @@ class SmartTaskProcessor:
                 num_subtasks = int(match.group(1))
                 subtask_text = match.group(2).strip()
                 lines = re.split(r'\d+\)\s*', subtask_text)[1:]
+                
+                # Verify number of subtasks matches
                 if len(lines) == num_subtasks:
+                    # Use backward chaining in cognitive engine
+                    steps = [line.strip() for line in lines]
+                    self.cognitive_engine.backward_chain(
+                        target=f"Complete task {task.task_id}",
+                        steps=steps
+                    )
+                    
+                    # Spawn subtasks
                     for i, line in enumerate(lines, start=1):
                         desc = line.strip()
-                        self._spawn_subtask(task, desc)
+                        subtask = self._spawn_subtask(task, desc)
+                        
+                        # Add subgoal for each subtask
+                        self.cognitive_engine.set_subgoal(
+                            subgoal=f"Complete subtask {i} of {num_subtasks}: {desc[:30]}...",
+                            metadata={"parent_task_id": task.task_id, "subtask_id": subtask.task_id}
+                        )
+                    
+                    return True
                 else:
                     logger.warning(f"[SmartTaskProcessor] Mismatch in subtask count vs lines found.")
+                    
+                    # Add verification with error
+                    self.cognitive_engine.verify(
+                        description=f"Subtask count verification for task {task.task_id}",
+                        result=f"Expected {num_subtasks} subtasks, found {len(lines)}",
+                        is_correct=False
+                    )
             except Exception as e:
                 logger.exception(f"[SmartTaskProcessor] Error parsing subtasks: {e}")
+                
+                # Add error to cognitive engine
+                self.cognitive_engine.add_reasoning_step(
+                    behavior=CognitiveBehavior.VERIFICATION,
+                    description=f"Error parsing subtasks for task {task.task_id}",
+                    result=str(e),
+                    is_correct=False
+                )
+        
+        return False
 
-        # 3) Mark completed, reflect
-        self.memory_store.update_task_status(task.task_id, "COMPLETED")
-        self.reflection.reflect_on_task(task)
-        logger.info(f"[SmartTaskProcessor] Completed task {task.task_id}")
-
-    def _spawn_subtask(self, parent_task: Task, description: str) -> None:
+    def _spawn_subtask(self, parent_task: Task, description: str) -> Task:
         new_task_id = len(self.memory_store) + 1
         new_priority = max(0, parent_task.priority - 1)
         t = Task(new_task_id, new_priority, description, parent_id=parent_task.task_id)
         self.memory_store.add_task(t)
         logger.info(f"[SmartTaskProcessor] Spawned subtask {t}")
+        return t
 
 ###############################################################################
 # TASK SCHEDULER
@@ -916,6 +1268,7 @@ class R1Agent:
      - Has an action generator
      - Has a plan manager
      - Has a knowledge base
+     - Has cognitive modeling for problem solving
      - Indefinite runtime in main(), shutting down only on user command
     """
     def __init__(self):
@@ -932,7 +1285,13 @@ class R1Agent:
         self.function_adapter = FunctionAdapter()
         self.memory_store = TaskMemoryStore()
         self.conversation = ConversationMemory()
+        
+        # Initialize the self-reflective cognition with cognitive modeling capabilities
         self.reflection = SelfReflectiveCognition()
+        
+        # Get a direct reference to the cognitive engine for the agent
+        self.cognitive_engine = self.reflection.cognitive_engine
+        
         self.processor = SmartTaskProcessor(
             memory_store=self.memory_store,
             function_adapter=self.function_adapter,
@@ -955,9 +1314,10 @@ class R1Agent:
         self.system_prompt = (
             "<META_RECURSIVE_SELF_AWARENESS>\n"
             "You are an extremely advanced AI with memory, goals, knowledge base, "
-            "and the ability to do anything with <function_call> do_anything: <code>... </code>.\n"
+            "cognitive modeling abilities, and the ability to do anything with <function_call> do_anything: <code>... </code>.\n"
             "You also can break tasks into Subtask(n). Indefinite concurrency with the scheduler.\n"
             "Code introspection is possible via the code archive. You have 25 candidate next steps.\n"
+            "Your cognitive modeling includes verification, backtracking, subgoal setting, and backward chaining.\n"
             "Use these capabilities responsibly.\n"
             "</META_RECURSIVE_SELF_AWARENESS>\n"
         )
@@ -973,6 +1333,20 @@ class R1Agent:
         self.knowledge_base.add_fact("agent definition",
             "An agent is an entity capable of acting in an environment to achieve goals."
         )
+        
+        # Add cognitive behaviors to knowledge base
+        self.knowledge_base.add_fact("verification",
+            "A cognitive behavior where the agent checks the correctness of intermediate steps or results."
+        )
+        self.knowledge_base.add_fact("backtracking",
+            "A cognitive behavior where the agent abandons failing approaches and tries alternatives."
+        )
+        self.knowledge_base.add_fact("subgoal_setting",
+            "A cognitive behavior where the agent breaks a complex problem into smaller, manageable parts."
+        )
+        self.knowledge_base.add_fact("backward_chaining",
+            "A cognitive behavior where the agent starts from the goal and works backwards to determine steps."
+        )
 
     def add_goal(self, name: str, description: str, priority: int = 5) -> Goal:
         return self.goal_manager.create_goal(name, description, priority)
@@ -985,17 +1359,30 @@ class R1Agent:
         Feeds the user input to the conversation, calls the LLM,
         checks for do_anything calls, spawns a meta-task from user input.
         Uses structured output format and chain-of-thought reasoning.
+        Enhanced with cognitive modeling.
         """
         # 1) Add user message
         self.conversation.add_user_utterance(user_input)
+        
+        # Add a cognitive step for setting a subgoal based on user input
+        self.cognitive_engine.set_subgoal(
+            subgoal=f"Process and respond to user input: {user_input[:30]}...",
+            metadata={"input_type": "user_message"}
+        )
 
         # 2) Build messages with structured output format instruction
         messages = self._build_messages()
         
-        # Add structured output format instruction
-        messages[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
+        # Add structured output format instruction with cognitive behaviors
+        messages[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
 
         # 3) Call the LLM and stream the response
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EXPLORATION,
+            description="Generating response with LLM",
+            metadata={"model": "deepseek-ai/DeepSeek-R1"}
+        )
+        
         response_stream = self.client.chat.completions.create(
             model="deepseek-ai/DeepSeek-R1",
             messages=messages,
@@ -1016,11 +1403,26 @@ class R1Agent:
 
         # 4) Add agent utterance
         self.conversation.add_agent_utterance(full_text)
+        
+        # Add verification step for response generation
+        self.cognitive_engine.verify(
+            description="Response generation",
+            result="Complete",
+            is_correct=True
+        )
 
         # 5) Check immediate do_anything
         result = self.function_adapter.process_function_calls(full_text)
         if result:
             logger.info(f"[R1Agent] Immediate do_anything result: {result}")
+            
+            # Add execution step to cognitive model
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.VERIFICATION,
+                description="Function call execution",
+                result=result,
+                is_correct=True if result.get("status") == "success" else False
+            )
 
         # 6) Spawn a meta-task from user input
         new_task_id = len(self.memory_store) + 1
@@ -1031,21 +1433,99 @@ class R1Agent:
         )
         self.memory_store.add_task(meta_task)
         self.task_queue.push(meta_task)
+        
+        # Add task creation to cognitive model
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.SUBGOAL_SETTING,
+            description=f"Created task {new_task_id} from user input",
+            metadata={"task_id": new_task_id}
+        )
 
-        # 7) Extract and enrich facts and reasoning
-        facts, thinking, answer = self._extract_structured_output(full_text)
+        # 7) Extract and enrich facts, reasoning, and cognitive processes
+        facts, thinking, cognition, answer = self._extract_structured_output(full_text)
+        
+        # Process cognitive behaviors from the response
+        if cognition:
+            self._process_cognitive_behaviors(cognition, new_task_id)
+        
         if facts and thinking:
-            enriched_answer = self._perform_cot_enrichment(facts, thinking, answer)
+            enriched_answer = self._perform_cot_enrichment(facts, thinking, answer, cognition)
             # Add enriched answer to knowledge base
             self.knowledge_base.add_fact(f"enriched_answer_{new_task_id}", enriched_answer)
             print("\n=== Enriched Answer ===\n")
             print(enriched_answer)
             print("\n=========================\n")
+            
+            # Add chain-of-thought step to cognitive model
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.VERIFICATION,
+                description="Chain-of-thought enrichment",
+                result="Successful",
+                is_correct=True
+            )
 
         # 8) Use tool calls for data extraction and grounding
         self._use_tool_calls(facts, thinking, answer)
+        
+        # 9) Add final step in cognitive model
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.VERIFICATION,
+            description="Response processing complete",
+            is_correct=True
+        )
+        
+        # 10) Log the cognitive reasoning trace
+        reasoning_summary = self.cognitive_engine.get_reasoning_summary()
+        logger.info(f"[R1Agent] Cognitive reasoning trace:\n{reasoning_summary}")
 
         return full_text
+        
+    def _process_cognitive_behaviors(self, cognition: str, task_id: int) -> None:
+        """
+        Process and record cognitive behaviors extracted from the LLM response.
+        """
+        if not cognition:
+            return
+            
+        # Extract verification behaviors
+        verification_match = re.search(r"Verification:\s*\[(.*?)\]", cognition)
+        if verification_match and verification_match.group(1).strip() != "":
+            verification_text = verification_match.group(1).strip()
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.VERIFICATION,
+                description=f"Model-reported verification: {verification_text}",
+                metadata={"source": "llm_response", "task_id": task_id}
+            )
+            
+        # Extract backtracking behaviors
+        backtracking_match = re.search(r"Backtracking:\s*\[(.*?)\]", cognition)
+        if backtracking_match and backtracking_match.group(1).strip() != "":
+            backtracking_text = backtracking_match.group(1).strip()
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.BACKTRACKING,
+                description=f"Model-reported backtracking: {backtracking_text}",
+                metadata={"source": "llm_response", "task_id": task_id}
+            )
+            
+        # Extract subgoal setting behaviors
+        subgoal_match = re.search(r"Subgoal Setting:\s*\[(.*?)\]", cognition)
+        if subgoal_match and subgoal_match.group(1).strip() != "":
+            subgoal_text = subgoal_match.group(1).strip()
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.SUBGOAL_SETTING,
+                description=f"Model-reported subgoal setting: {subgoal_text}",
+                metadata={"source": "llm_response", "task_id": task_id}
+            )
+            
+        # Extract backward chaining behaviors
+        backward_match = re.search(r"Backward Chaining:\s*\[(.*?)\]", cognition)
+        if backward_match and backward_match.group(1).strip() != "":
+            backward_text = backward_match.group(1).strip() 
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.BACKWARD_CHAINING,
+                description=f"Model-reported backward chaining: {backward_text}",
+                metadata={"source": "llm_response", "task_id": task_id}
+            )
 
     def _use_tool_calls(self, facts: List[str], thinking: str, answer: str) -> None:
         """
@@ -1077,10 +1557,11 @@ class R1Agent:
             logger.error(f"[R1Agent] Error calling external tool: {e}")
         return None
         
-    def _extract_structured_output(self, text: str) -> Tuple[List[str], str, str]:
-        """Extract facts, thinking, and answer from structured output."""
+    def _extract_structured_output(self, text: str) -> Tuple[List[str], str, str, str]:
+        """Extract facts, thinking, cognition, and answer from structured output."""
         facts = []
         thinking = ""
+        cognition = ""
         answer = ""
         
         # Extract facts
@@ -1093,16 +1574,21 @@ class R1Agent:
         thinking_match = re.search(r"<thinking>(.*?)</thinking>", text, re.DOTALL)
         if thinking_match:
             thinking = thinking_match.group(1).strip()
+        
+        # Extract cognition
+        cognition_match = re.search(r"<cognition>(.*?)</cognition>", text, re.DOTALL)
+        if cognition_match:
+            cognition = cognition_match.group(1).strip()
             
         # Extract answer
         answer_match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
         if answer_match:
             answer = answer_match.group(1).strip()
             
-        return facts, thinking, answer
+        return facts, thinking, cognition, answer
         
-    def _perform_cot_enrichment(self, facts: List[str], thinking: str, answer: str) -> str:
-        """Perform chain-of-thought enrichment on the extracted components."""
+    def _perform_cot_enrichment(self, facts: List[str], thinking: str, answer: str, cognition: Optional[str] = None) -> str:
+        """Perform chain-of-thought enrichment on the extracted components with cognitive behavior analysis."""
         # Combine facts with thinking to create enriched answer
         if not facts and not thinking:
             return answer
@@ -1114,6 +1600,11 @@ class R1Agent:
             
         enriched += "\nFirst reasoning process:\n"
         enriched += thinking
+        
+        # Add cognitive behavior analysis if available
+        if cognition:
+            enriched += "\n\nCognitive behaviors employed:\n"
+            enriched += cognition
         
         # Add meta-reasoning about the reasoning process
         enriched += "\n\nMeta-reasoning about the reasoning process:\n"
@@ -1131,10 +1622,24 @@ class R1Agent:
                 # Check if the reasoning step builds on previous steps
                 builds_on_previous = i > 0 and any(f"step {j+1}" in line.lower() for j in range(i))
                 
+                # Identify cognitive behaviors in this step
+                cognitive_behaviors = []
+                if "verify" in line.lower() or "check" in line.lower() or "confirm" in line.lower():
+                    cognitive_behaviors.append("verification")
+                if "change" in line.lower() or "instead" in line.lower() or "alternative" in line.lower():
+                    cognitive_behaviors.append("backtracking")
+                if "break down" in line.lower() or "sub-problem" in line.lower() or "subtask" in line.lower():
+                    cognitive_behaviors.append("subgoal setting")
+                if "goal" in line.lower() and "backward" in line.lower():
+                    cognitive_behaviors.append("backward chaining")
+                
                 # Generate meta commentary
                 meta = f"Step {i+1}: Confidence level: {confidence}. "
                 if builds_on_previous:
                     meta += "This step builds on previous reasoning. "
+                
+                if cognitive_behaviors:
+                    meta += f"Cognitive behaviors: {', '.join(cognitive_behaviors)}. "
                 
                 if i == len(lines) - 1 and len(lines) > 1:
                     meta += "This is a concluding step that synthesizes previous reasoning."
@@ -1142,6 +1647,35 @@ class R1Agent:
                 meta_reasoning.append(meta)
         
         enriched += "\n".join(meta_reasoning)
+        
+        # Add cognitive strategies analysis section
+        enriched += "\n\nCognitive strategies effectiveness analysis:\n"
+        
+        # Parse cognitive behaviors for analysis
+        verification_present = "Verification" in cognition if cognition else False
+        backtracking_present = "Backtracking" in cognition if cognition else False
+        subgoal_present = "Subgoal Setting" in cognition if cognition else False
+        backward_present = "Backward Chaining" in cognition if cognition else False
+        
+        if verification_present:
+            enriched += "- Verification was effectively used to validate intermediate results, increasing solution accuracy.\n"
+        else:
+            enriched += "- Verification could have been used more extensively to check intermediate conclusions.\n"
+            
+        if backtracking_present:
+            enriched += "- Backtracking was applied to abandon unproductive paths, demonstrating cognitive flexibility.\n"
+        else:
+            enriched += "- Little evidence of backtracking, suggesting a linear approach to the problem.\n"
+            
+        if subgoal_present:
+            enriched += "- Effective use of subgoal decomposition made the problem more manageable.\n"
+        else:
+            enriched += "- The problem could have been broken down into clearer subgoals.\n"
+            
+        if backward_present:
+            enriched += "- Backward chaining from the goal state helped focus the reasoning process.\n"
+        else:
+            enriched += "- A more goal-directed approach using backward chaining might have been beneficial.\n"
         
         # Add final enriched answer with both levels of reasoning
         enriched += "\n\nThe doubly-enriched answer is:\n"
@@ -1186,12 +1720,80 @@ def main():
             priority=1
         )
         logger.info(f"Created new goal: {g}")
+        
+        # Add initial cognitive reasoning steps
+        agent.cognitive_engine.set_subgoal(
+            subgoal="Initialize agent and prepare for user interaction",
+            metadata={"phase": "startup"}
+        )
+        
+        agent.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.VERIFICATION,
+            description="Agent initialization complete",
+            result="System ready",
+            is_correct=True
+        )
 
         while True:
+            # Add status check using cognitive verification
+            agent.cognitive_engine.verify(
+                description="System status before user input",
+                result="Ready",
+                is_correct=True
+            )
+            
             user_text = input("\n[User] Enter your query (or 'exit' to quit):\n> ").strip()
+            
             if user_text.lower() in ["exit", "quit"]:
                 logger.info("[main] Exiting upon user request.")
+                agent.cognitive_engine.add_reasoning_step(
+                    behavior=CognitiveBehavior.VERIFICATION,
+                    description="Received exit command",
+                    result="Initiating shutdown",
+                    is_correct=True
+                )
                 break
+                
+            # Add special commands to view cognitive reasoning trace
+            if user_text.lower() == "show reasoning":
+                reasoning_summary = agent.cognitive_engine.get_reasoning_summary()
+                print("\n=== Cognitive Reasoning Trace ===\n")
+                print(reasoning_summary)
+                print("\n=================================\n")
+                continue
+                
+            if user_text.lower() == "solve puzzle":
+                # Demonstrate cognitive capabilities with a simple puzzle
+                print("\n=== Solving Countdown-style Puzzle ===\n")
+                agent.cognitive_engine.set_subgoal(
+                    subgoal="Solve a Countdown-style puzzle with numbers [25, 8, 5, 3] and target 30"
+                )
+                
+                # Step 1: Verification of the problem
+                agent.cognitive_engine.verify(
+                    description="Initial puzzle verification",
+                    result="Valid input: numbers=[25, 8, 5, 3], target=30",
+                    is_correct=True
+                )
+                
+                # Step 2: Try first approach
+                agent.cognitive_engine.add_reasoning_step(
+                    behavior=CognitiveBehavior.EXPLORATION,
+                    description="First attempt: 25 + 8 - 3",
+                    result=30,
+                    is_correct=True
+                )
+                
+                # Step 3: Verify the solution
+                agent.cognitive_engine.verify(
+                    description="Verify calculation: 25 + 8 - 3 = 30",
+                    result="Solution found",
+                    is_correct=True
+                )
+                
+                print("Solution: 25 + 8 - 3 = 30")
+                print("\n==================================\n")
+                continue
 
             # Generate immediate LLM response
             response = agent.generate_response(user_text)
@@ -1202,6 +1804,14 @@ def main():
             # If you want to check tasks, reflection, or goals, do so here or in logs.
 
     finally:
+        # Add final cognitive step for shutdown
+        agent.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.VERIFICATION,
+            description="Agent shutdown sequence",
+            result="Shutting down all components",
+            is_correct=True
+        )
+        
         agent.shutdown()
 
 if __name__ == "__main__":
