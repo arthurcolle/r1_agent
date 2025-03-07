@@ -1973,15 +1973,24 @@ class SmartTaskProcessor:
 
     def _process_task_with_cognition(self, task: Task) -> bool:
         """
-        Process a task using cognitive modeling approach.
+        Process a task using cognitive modeling approach with streaming output.
         Returns True if successful, False otherwise.
         """
         try:
+            # Always show task processing details
+            print(f"\n=== Processing Task {task.task_id} ===\n")
+            print(f"Description: {task.description}\n")
+            print(f"Priority: {task.priority}, Status: {task.status}\n")
+            
             # First, check if this task should be decomposed using structured output
             if self._should_decompose_task(task):
+                print("Task complexity suggests decomposition. Attempting structured decomposition...\n")
                 decomposition_success = self._decompose_task_with_structured_output(task)
                 if decomposition_success:
+                    print("Task successfully decomposed into subtasks.\n")
+                    print("=========================\n")
                     return True
+                print("Decomposition unsuccessful, trying alternative strategies.\n")
             
             # Try different strategies in order, with cognitive reasoning
             strategies = [
@@ -2003,7 +2012,7 @@ class SmartTaskProcessor:
             )
             
             # Stream the exploration process
-            print("\n=== Exploration Rollout ===\n")
+            print("\n=== Strategy Exploration ===\n")
             
             for i, strategy in enumerate(strategies):
                 # Add reasoning step for trying this strategy
@@ -2014,9 +2023,11 @@ class SmartTaskProcessor:
                     confidence=0.7
                 )
                 
-                # Stream the strategy attempt
+                # Stream the strategy attempt with more detailed output
                 strategy_name = strategy.__name__.replace('_try_', '')
-                print(f"Strategy {i+1}: {strategy_name}... ", end='', flush=True)
+                print(f"Strategy {i+1}: {strategy_name}")
+                print(f"  Description: Attempting to process task using {strategy_name}")
+                print(f"  Execution: ", end='', flush=True)
                 
                 # Try the strategy
                 result = strategy(task)
@@ -2024,6 +2035,12 @@ class SmartTaskProcessor:
                 if result:
                     # Strategy succeeded
                     print("SUCCESS ✓")
+                    print(f"  Details: Successfully processed task using {strategy_name}")
+                    
+                    # Show result summary if available
+                    if isinstance(result, dict) and "summary" in result:
+                        print(f"  Result summary: {result['summary']}")
+                    
                     self.cognitive_engine.verify(
                         description=f"Strategy {strategy.__name__}",
                         result="Success",
@@ -2035,17 +2052,23 @@ class SmartTaskProcessor:
                 else:
                     # Strategy didn't apply or failed
                     print("NOT APPLICABLE")
+                    print(f"  Details: Strategy {strategy_name} was not applicable to this task")
+                    
                     self.cognitive_engine.verify(
                         description=f"Strategy {strategy.__name__}",
                         result="Not applicable",
                         is_correct=None,
                         confidence=0.5
                     )
+                
+                print("")  # Add spacing between strategies
             
             print("\n=========================\n")
             
             # If no strategy worked but we didn't encounter errors, still count as success
             if not success:
+                print("No specific strategy was applicable. Completing task with default processing.\n")
+                
                 # Add final reasoning step
                 self.cognitive_engine.add_reasoning_step(
                     behavior=CognitiveBehavior.VERIFICATION,
@@ -2056,21 +2079,29 @@ class SmartTaskProcessor:
                 )
             
             # Update the chain of thought summary
-            self.cognitive_engine.update_chain_summary(
-                f"Task {task.task_id} processed with {'successful' if success else 'default'} strategy. " +
-                f"Description: '{task.description[:50]}...'"
-            )
+            summary = f"Task {task.task_id} processed with {'successful' if success else 'default'} strategy. " + \
+                     f"Description: '{task.description[:50]}...'"
+            
+            self.cognitive_engine.update_chain_summary(summary)
+            print(f"Cognitive summary: {summary}\n")
             
             # Set conclusion
+            conclusion = f"Task {task.task_id} completed successfully"
             self.cognitive_engine.set_conclusion(
-                f"Task {task.task_id} completed successfully",
+                conclusion,
                 confidence=0.85 if success else 0.6
             )
+            
+            print(f"Conclusion: {conclusion}\n")
+            print("=========================\n")
             
             return True
             
         except Exception as e:
             logger.exception(f"[SmartTaskProcessor] Error processing task {task.task_id}: {e}")
+            
+            print(f"\n❌ Error processing task {task.task_id}: {e}\n")
+            print(f"Traceback: {traceback.format_exc()[:200]}...\n")
             
             # Add error step to cognitive engine
             self.cognitive_engine.add_reasoning_step(
@@ -2082,15 +2113,20 @@ class SmartTaskProcessor:
             )
             
             # Update the chain of thought with error information
-            self.cognitive_engine.update_chain_summary(
-                f"Task {task.task_id} processing failed with error: {str(e)[:100]}..."
-            )
+            error_summary = f"Task {task.task_id} processing failed with error: {str(e)[:100]}..."
+            self.cognitive_engine.update_chain_summary(error_summary)
+            
+            print(f"Error summary: {error_summary}\n")
             
             # Set conclusion
+            error_conclusion = f"Task {task.task_id} failed due to error"
             self.cognitive_engine.set_conclusion(
-                f"Task {task.task_id} failed due to error",
+                error_conclusion,
                 confidence=0.9
             )
+            
+            print(f"Error conclusion: {error_conclusion}\n")
+            print("=========================\n")
             
             return False
 
@@ -2285,7 +2321,7 @@ result
         
     def _decompose_task_with_structured_output(self, task: Task) -> bool:
         """
-        Use structured output to decompose a task into subtasks.
+        Use structured output to decompose a task into subtasks with streaming output.
         Returns True if successful, False otherwise.
         """
         try:
@@ -2297,6 +2333,8 @@ result
             
             # Log the attempt
             logger.info(f"[SmartTaskProcessor] Attempting structured decomposition of task {task.task_id}")
+            print(f"\n=== Decomposing Task {task.task_id} ===\n")
+            print(f"Task: {task.description}\n")
             
             # Add reasoning step
             self.cognitive_engine.add_reasoning_step(
@@ -2306,22 +2344,34 @@ result
                 confidence=0.8
             )
             
-            # Call the LLM to decompose the task
+            # Call the LLM to decompose the task with enhanced instructions
             messages = [
-                {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks with clear dependencies. Return your response in JSON format with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), estimated_complexity (object mapping subtask indices to complexity values 1-10), and rationale (string)."},
-                {"role": "user", "content": f"Decompose this task into subtasks: {task.description}"}
+                {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks with clear dependencies, execution steps, and resource requirements. Return your response in JSON format with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), estimated_complexity (object mapping subtask indices to complexity values 1-10), execution_steps (array of strings with detailed execution steps for each subtask), and rationale (string)."},
+                {"role": "user", "content": f"Decompose this task into detailed subtasks with execution steps: {task.description}"}
             ]
             
-            # Use the client to get a structured response
-            response = self.client.chat.completions.create(
+            # Stream the decomposition process
+            print("Streaming decomposition process...\n")
+            
+            decomp_stream = self.client.chat.completions.create(
                 model="deepseek-ai/DeepSeek-R1",
                 messages=messages,
                 temperature=0.7,
-                max_tokens=1000
+                max_tokens=1500,
+                stream=True
             )
             
+            decomp_chunks = []
+            for chunk in decomp_stream:
+                token = chunk.choices[0].delta.content
+                if token:
+                    decomp_chunks.append(token)
+                    print(token, end='', flush=True)
+            
+            print("\n\n")
+            
             # Extract the response text
-            response_text = response.choices[0].message.content
+            response_text = "".join(decomp_chunks)
             
             # Parse the JSON response
             import json
@@ -2336,7 +2386,18 @@ result
                     estimated_complexity=json_data.get("estimated_complexity", {}),
                     rationale=json_data.get("rationale", "Task decomposed based on complexity and logical flow.")
                 )
+                
+                # Extract execution steps if available
+                execution_steps = json_data.get("execution_steps", [])
+                if execution_steps:
+                    print("\n=== Execution Steps ===\n")
+                    for i, step in enumerate(execution_steps):
+                        print(f"{i+1}. {step}")
+                    print("\n")
+                
             except json.JSONDecodeError:
+                print("\nJSON parsing failed. Extracting subtasks using pattern matching...\n")
+                
                 # If JSON parsing fails, create a simple decomposition from the text
                 # Extract subtasks using regex or simple parsing
                 import re
@@ -2356,33 +2417,56 @@ result
                     estimated_complexity={},
                     rationale="Task decomposed into sequential steps."
                 )
+                
+                print("Extracted subtasks:\n")
+                for i, subtask in enumerate(subtasks):
+                    print(f"{i+1}. {subtask['description']}")
+                print("\n")
             
             # Record the decomposition in the cognitive model
             self.cognitive_engine.decompose_task(task, decomposition)
             
             # Create subtasks based on the decomposition
             created_subtasks = []
+            print("\n=== Creating Subtasks ===\n")
+            
             for i, subtask_info in enumerate(decomposition.subtasks):
                 # Create a new subtask
                 subtask = self._spawn_subtask(task, subtask_info["description"])
                 created_subtasks.append(subtask)
                 
                 # Add tags if dependencies exist
+                dependencies = []
                 if decomposition.dependencies and str(i) in decomposition.dependencies:
                     for dep_idx in decomposition.dependencies[str(i)]:
                         if 0 <= dep_idx < len(created_subtasks):
                             # Add a tag indicating dependency
-                            subtask.add_tag(f"depends_on_{created_subtasks[dep_idx].task_id}")
+                            dep_task = created_subtasks[dep_idx]
+                            subtask.add_tag(f"depends_on_{dep_task.task_id}")
+                            dependencies.append(dep_task.task_id)
                 
                 # Add complexity tag if available
+                complexity = "unknown"
                 if decomposition.estimated_complexity and str(i) in decomposition.estimated_complexity:
                     complexity = decomposition.estimated_complexity[str(i)]
                     subtask.add_tag(f"complexity_{complexity}")
+                
+                # Push subtask to queue for immediate processing
+                self.task_queue.push(subtask)
+                
+                # Print subtask details
+                print(f"Subtask {i+1}: {subtask.task_id}")
+                print(f"  Description: {subtask_info['description']}")
+                print(f"  Complexity: {complexity}")
+                if dependencies:
+                    print(f"  Dependencies: {dependencies}")
+                print("")
             
             # Update the task result with the decomposition
             self.memory_store.update_task_result(task.task_id, {
                 "decomposition": decomposition.model_dump(),
-                "subtasks": [st.task_id for st in created_subtasks]
+                "subtasks": [st.task_id for st in created_subtasks],
+                "full_decomposition_text": response_text
             })
             
             # Add verification step
@@ -2394,10 +2478,16 @@ result
             )
             
             logger.info(f"[SmartTaskProcessor] Successfully decomposed task {task.task_id} into {len(created_subtasks)} subtasks")
+            print(f"\nSuccessfully decomposed task into {len(created_subtasks)} subtasks and queued for processing.\n")
+            print("=========================\n")
+            
             return True
             
         except Exception as e:
             logger.exception(f"[SmartTaskProcessor] Error in structured decomposition: {e}")
+            
+            print(f"\n❌ Error in structured decomposition: {e}\n")
+            print(f"Traceback: {traceback.format_exc()[:200]}...\n")
             
             # Add error to cognitive engine
             self.cognitive_engine.add_reasoning_step(
@@ -2407,6 +2497,8 @@ result
                 is_correct=False,
                 confidence=0.9
             )
+            
+            print("=========================\n")
             
             return False
 
@@ -2972,6 +3064,7 @@ class R1Agent:
         checks for do_anything calls, spawns a meta-task from user input.
         Uses structured output format and chain-of-thought reasoning.
         Enhanced with cognitive modeling for structured outputs and proactive problem-solving.
+        Now with streaming output for all LLM generation.
         """
         # 1) Add user message
         self.conversation.add_user_utterance(user_input)
@@ -2990,94 +3083,62 @@ class R1Agent:
         self.cognitive_engine.add_reasoning_step(
             behavior=CognitiveBehavior.EXPLORATION,
             description="Generating structured response with LLM",
-            metadata={"model": "deepseek-ai/DeepSeek-R1", "structured_output": True},
+            metadata={"model": "deepseek-ai/DeepSeek-R1", "structured_output": True, "streaming": True},
             confidence=0.8
         )
         
-        try:
-            # Add structured output format instruction with cognitive behaviors
-            structured_prompt = messages.copy()
-            structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
-            
-            # Use the client to get a structured response
-            response = self.client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-R1",
-                messages=structured_prompt,
-                temperature=0.7,
-                top_p=0.9,
-                max_tokens=1500
-            )
-            
-            # Extract the response text
-            full_text = response.choices[0].message.content
-            
-            # Extract structured components from the text response
-            facts, thinking, cognition, answer = self._extract_structured_output(full_text)
-            
-            # Create a structured response object
-            structured_response = FactsThinkingAnswer(
-                facts=facts or ["No facts provided"],
-                thinking=thinking or "No thinking process provided",
-                cognition=cognition or "No cognitive analysis provided",
-                answer=answer or "No answer provided"
-            )
-            
-            # Add verification step for structured response generation
-            self.cognitive_engine.verify(
-                description="Structured response generation",
-                result="Complete",
-                is_correct=True,
-                confidence=0.9
-            )
-            
-        except Exception as e:
-            logger.exception(f"[R1Agent] Error generating structured response: {e}")
-            
-            # Fall back to regular streaming response
-            self.cognitive_engine.backtrack(
-                reason=f"Structured output failed: {str(e)[:100]}...",
-                confidence=0.8
-            )
-            
-            # Add structured output format instruction with cognitive behaviors
-            messages[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
-            
-            # Stream the response
-            response_stream = self.client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-R1",
-                messages=messages,
-                temperature=0.7,
-                top_p=0.9,
-                stream=True
-            )
-            
-            streamed_response = []
-            print("\n=== Streaming Response ===\n")
-            for chunk in response_stream:
-                token = chunk.choices[0].delta.content
-                if token:
-                    streamed_response.append(token)
-                    print(token, end='', flush=True)
-                    
-                    # Process token through registry for potential code execution
-                    self.function_adapter.token_registry.process_token(token)
-            print("\n\n=========================\n")
-            
-            # Clear the token buffer after processing the response
-            self.function_adapter.token_registry.clear_buffer()
-            
-            full_text = "".join(streamed_response)
-            
-            # Extract structured components from the text response
-            facts, thinking, cognition, answer = self._extract_structured_output(full_text)
-            
-            # Create a structured response object
-            structured_response = FactsThinkingAnswer(
-                facts=facts or ["No facts provided"],
-                thinking=thinking or "No thinking process provided",
-                cognition=cognition or "No cognitive analysis provided",
-                answer=answer or "No answer provided"
-            )
+        # Add structured output format instruction with cognitive behaviors
+        structured_prompt = messages.copy()
+        structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
+        
+        # Always use streaming for better user experience and real-time processing
+        print("\n=== Streaming Response ===\n")
+        
+        # Stream the response
+        response_stream = self.client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1",
+            messages=structured_prompt,
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=1500,
+            stream=True
+        )
+        
+        streamed_response = []
+        for chunk in response_stream:
+            token = chunk.choices[0].delta.content
+            if token:
+                streamed_response.append(token)
+                print(token, end='', flush=True)
+                
+                # Process token through registry for potential code execution
+                self.function_adapter.token_registry.process_token(token)
+        
+        print("\n\n=========================\n")
+        
+        # Clear the token buffer after processing the response
+        self.function_adapter.token_registry.clear_buffer()
+        
+        full_text = "".join(streamed_response)
+        
+        # Extract structured components from the text response
+        facts, thinking, cognition, answer = self._extract_structured_output(full_text)
+        
+        # Create a structured response object
+        structured_response = FactsThinkingAnswer(
+            facts=facts or ["No facts provided"],
+            thinking=thinking or "No thinking process provided",
+            cognition=cognition or "No cognitive analysis provided",
+            answer=answer or "No answer provided"
+        )
+        
+        # Add verification step for structured response generation
+        self.cognitive_engine.verify(
+            description="Structured response generation",
+            result="Complete",
+            is_correct=True,
+            confidence=0.9
+        )
 
         # 4) Add agent utterance
         self.conversation.add_agent_utterance(full_text)
@@ -3102,93 +3163,115 @@ class R1Agent:
             description=user_input
         )
         
-        # Try to decompose the task using structured output
+        # Always decompose tasks with streaming output
+        print("\n=== Task Decomposition (Streaming) ===\n")
+        
+        # Create a decomposition request with enhanced instructions
+        decomp_messages = [
+            {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks with clear dependencies and execution steps. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), approach (string describing overall approach), and execution_steps (array of strings describing how to execute each subtask)."},
+            {"role": "user", "content": f"Decompose this task into detailed subtasks with execution steps: {user_input}"}
+        ]
+        
+        # Stream the decomposition process
+        decomp_stream = self.client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1",
+            messages=decomp_messages,
+            temperature=0.7,
+            max_tokens=1500,
+            stream=True
+        )
+        
+        decomp_chunks = []
+        for chunk in decomp_stream:
+            token = chunk.choices[0].delta.content
+            if token:
+                decomp_chunks.append(token)
+                print(token, end='', flush=True)
+        
+        print("\n\n=========================\n")
+        
+        decomp_text = "".join(decomp_chunks)
+        
+        # Parse the JSON response
+        import json
         try:
-            # Always consider decomposition for better goal-seeking behavior
-            if len(user_input.split()) > 5:  # Lower threshold to encourage decomposition
-                # Create a decomposition request
-                decomp_messages = [
-                    {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), and approach (string describing overall approach)."},
-                    {"role": "user", "content": f"Decompose this task into subtasks: {user_input}"}
-                ]
-                    
-                # Use the client to get a structured response
-                decomp_response = self.client.chat.completions.create(
-                    model="deepseek-ai/DeepSeek-R1",
-                    messages=decomp_messages,
-                    temperature=0.7,
-                    max_tokens=1000
-                )
-                    
-                # Extract the response text
-                decomp_text = decomp_response.choices[0].message.content
-                    
-                # Parse the JSON response
-                import json
-                try:
-                    json_data = json.loads(decomp_text)
-                    # Create a TaskDecompositionResponse object from the JSON data
-                    decomposition = TaskDecompositionResponse(
-                        subtasks=json_data.get("subtasks", []),
-                        dependencies=json_data.get("dependencies", {}),
-                        approach=json_data.get("approach", "Sequential approach to task completion")
-                    )
-                except json.JSONDecodeError:
-                    # If JSON parsing fails, create a simple decomposition from the text
-                    # Extract subtasks using regex or simple parsing
-                    import re
-                    subtask_matches = re.findall(r"(?:^|\n)(?:\d+\.\s*|\-\s*)(.*?)(?:\n|$)", decomp_text)
-                    subtasks = [{"description": match.strip()} for match in subtask_matches if match.strip()]
-                        
-                    if not subtasks:
-                        # If regex fails, split by newlines and create subtasks
-                        lines = [line.strip() for line in decomp_text.split("\n") if line.strip()]
-                        subtasks = [{"description": line} for line in lines[:5]]  # Limit to 5 subtasks
-                        
-                    decomposition = TaskDecompositionResponse(
-                        subtasks=subtasks,
-                        dependencies={},
-                        approach="Sequential approach to task completion"
-                    )
+            # Try to parse as JSON first
+            json_data = json.loads(decomp_text)
+            # Create a TaskDecompositionResponse object from the JSON data
+            decomposition = TaskDecompositionResponse(
+                subtasks=json_data.get("subtasks", []),
+                dependencies=json_data.get("dependencies", {}),
+                approach=json_data.get("approach", "Sequential approach to task completion")
+            )
+            
+            # Extract execution steps if available
+            execution_steps = json_data.get("execution_steps", [])
+            if execution_steps:
+                print("\n=== Execution Steps ===\n")
+                for i, step in enumerate(execution_steps):
+                    print(f"{i+1}. {step}")
+                print("\n=========================\n")
+        except json.JSONDecodeError:
+            # If JSON parsing fails, create a simple decomposition from the text
+            # Extract subtasks using regex or simple parsing
+            import re
+            subtask_matches = re.findall(r"(?:^|\n)(?:\d+\.\s*|\-\s*)(.*?)(?:\n|$)", decomp_text)
+            subtasks = [{"description": match.strip()} for match in subtask_matches if match.strip()]
                 
-                # Store the decomposition in the task result
-                self.memory_store.update_task_result(meta_task.task_id, {
-                    "decomposition": decomposition.model_dump(),
-                    "structured": True
-                })
+            if not subtasks:
+                # If regex fails, split by newlines and create subtasks
+                lines = [line.strip() for line in decomp_text.split("\n") if line.strip()]
+                subtasks = [{"description": line} for line in lines[:5]]  # Limit to 5 subtasks
                 
-                # Create subtasks based on the decomposition
-                for i, subtask_info in enumerate(decomposition.subtasks):
-                    subtask = self.processor._spawn_subtask(meta_task, subtask_info["description"])
-                    
-                    # Add dependencies if they exist
-                    if decomposition.dependencies and str(i) in decomposition.dependencies:
-                        for dep_idx in decomposition.dependencies[str(i)]:
-                            subtask.add_tag(f"depends_on_{dep_idx}")
-                
-                # Add planning step to cognitive model with more proactive approach
-                self.cognitive_engine.plan(
-                    plan="Proactive structured task decomposition",
-                    steps=[st["description"] for st in decomposition.subtasks],
-                    confidence=0.9
-                )
-                
-                # Add a goal-seeking step
-                self.cognitive_engine.add_reasoning_step(
-                    behavior=CognitiveBehavior.EXPLORATION,
-                    description="Identifying opportunities for proactive problem-solving",
-                    metadata={"approach": decomposition.approach},
-                    confidence=0.85
-                )
-                
-                logger.info(f"[R1Agent] Decomposed user input into {len(decomposition.subtasks)} subtasks")
-            else:
-                # For simpler tasks, just add to the queue
-                self.task_queue.push(meta_task)
-        except Exception as e:
-            logger.exception(f"[R1Agent] Error in structured decomposition: {e}")
-            # Fall back to simple task
-            self.task_queue.push(meta_task)
+            decomposition = TaskDecompositionResponse(
+                subtasks=subtasks,
+                dependencies={},
+                approach="Sequential approach to task completion"
+            )
+            
+            print("\n=== Extracted Subtasks ===\n")
+            for i, subtask in enumerate(subtasks):
+                print(f"{i+1}. {subtask['description']}")
+            print("\n=========================\n")
+        
+        # Store the decomposition in the task result
+        self.memory_store.update_task_result(meta_task.task_id, {
+            "decomposition": decomposition.model_dump(),
+            "structured": True,
+            "full_decomposition_text": decomp_text
+        })
+        
+        # Create subtasks based on the decomposition and push to queue
+        created_subtasks = []
+        for i, subtask_info in enumerate(decomposition.subtasks):
+            subtask = self.processor._spawn_subtask(meta_task, subtask_info["description"])
+            created_subtasks.append(subtask)
+            
+            # Add dependencies if they exist
+            if decomposition.dependencies and str(i) in decomposition.dependencies:
+                for dep_idx in decomposition.dependencies[str(i)]:
+                    if 0 <= dep_idx < len(created_subtasks):
+                        subtask.add_tag(f"depends_on_{created_subtasks[dep_idx].task_id}")
+            
+            # Push subtask to queue for immediate processing
+            self.task_queue.push(subtask)
+        
+        # Add planning step to cognitive model with more proactive approach
+        self.cognitive_engine.plan(
+            plan="Proactive structured task decomposition",
+            steps=[st["description"] for st in decomposition.subtasks],
+            confidence=0.9
+        )
+        
+        # Add a goal-seeking step
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EXPLORATION,
+            description="Identifying opportunities for proactive problem-solving",
+            metadata={"approach": decomposition.approach},
+            confidence=0.85
+        )
+        
+        logger.info(f"[R1Agent] Decomposed user input into {len(decomposition.subtasks)} subtasks and queued for processing")
         
         # Add task creation to cognitive model
         self.cognitive_engine.add_reasoning_step(
