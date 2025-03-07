@@ -513,7 +513,13 @@ class SelfReflectiveCognition:
                     analysis = "Recent reflections => " + " || ".join(recent)
                     logger.info(f"[SelfReflectiveCognition] {analysis}")
                 else:
-                    logger.info("[SelfReflectiveCognition] No reflections yet.")
+                    # Generate a reflection based on current tasks
+                    tasks = self.memory_store.list_tasks()
+                    completed_tasks = [t for t in tasks if t.status == "COMPLETED"]
+                    failed_tasks = [t for t in tasks if t.status == "FAILED"]
+                    reflection = f"Completed {len(completed_tasks)} tasks, {len(failed_tasks)} failed."
+                    self._reflections.append(reflection)
+                    logger.info(f"[SelfReflectiveCognition] {reflection}")
 
 ###############################################################################
 # IN-MEMORY CODE ARCHIVE
@@ -662,16 +668,36 @@ class ActionGenerator:
                     priority=g.priority
                 ))
 
-        # 6) Generate context-based placeholder actions
-        while len(actions) < 25:
-            i = len(actions) + 1
-            # Generate a context-based placeholder action
-            context_based_description = self._generate_context_based_action(conversation, goals, tasks, i)
-            actions.append(CandidateAction(
-                description=context_based_description,
-                rationale="Generated based on current context and trajectory path",
-                priority=10
-            ))
+        # 6) Generate additional context-based actions
+        if len(actions) < 25:
+            # Consider conversation history for context
+            recent_conversation = conversation.get_history()[-5:]
+            for i, utterance in enumerate(recent_conversation):
+                actions.append(CandidateAction(
+                    description=f"Analyze recent conversation: '{utterance['content'][:20]}...'",
+                    rationale="Understanding recent interactions can provide insights.",
+                    priority=5
+                ))
+
+            # Consider current goals and tasks for additional actions
+            for goal in goals:
+                if goal.status == "ACTIVE":
+                    actions.append(CandidateAction(
+                        description=f"Review progress on goal '{goal.name}'",
+                        rationale="Ensuring goals are on track is crucial for success.",
+                        priority=goal.priority
+                    ))
+
+            for task in tasks:
+                if task.status == "PENDING":
+                    actions.append(CandidateAction(
+                        description=f"Evaluate pending task: '{task.description[:20]}...'",
+                        rationale="Pending tasks need evaluation to ensure relevance.",
+                        priority=task.priority
+                    ))
+
+        # Ensure we have exactly 25 actions
+        actions = actions[:25]
 
         # Return only first 25
         return actions[:25]
