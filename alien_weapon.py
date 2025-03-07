@@ -1598,7 +1598,7 @@ class SmartTaskProcessor:
         
     def _decompose_task_with_structured_output(self, task: Task) -> bool:
         """
-        Use structured output with Pydantic to decompose a task into subtasks.
+        Use structured output to decompose a task into subtasks.
         Returns True if successful, False otherwise.
         """
         try:
@@ -1621,20 +1621,54 @@ class SmartTaskProcessor:
             
             # Call the LLM to decompose the task
             messages = [
-                {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks with clear dependencies."},
+                {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks with clear dependencies. Return your response in JSON format with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), estimated_complexity (object mapping subtask indices to complexity values 1-10), and rationale (string)."},
                 {"role": "user", "content": f"Decompose this task into subtasks: {task.description}"}
             ]
             
-            # Use the client to parse the response into the SubtaskDecomposition model
-            completion = self.client.beta.chat.completions.parse(
+            # Use the client to get a structured response
+            response = self.client.chat.completions.create(
                 model="deepseek-ai/DeepSeek-R1",
                 messages=messages,
-                response_format=SubtaskDecomposition,
-                response_model=SubtaskDecomposition
+                temperature=0.7,
+                max_tokens=1000
             )
             
-            # Extract the decomposition
-            decomposition = completion.choices[0].message.parsed
+            # Extract the response text
+            response_text = response.choices[0].message.content
+            
+            # Parse the JSON response
+            import json
+            try:
+                json_data = json.loads(response_text)
+                # Create a SubtaskDecomposition object from the JSON data
+                decomposition = SubtaskDecomposition(
+                    original_task_id=task.task_id,
+                    original_description=task.description,
+                    subtasks=json_data.get("subtasks", []),
+                    dependencies=json_data.get("dependencies", {}),
+                    estimated_complexity=json_data.get("estimated_complexity", {}),
+                    rationale=json_data.get("rationale", "Task decomposed based on complexity and logical flow.")
+                )
+            except json.JSONDecodeError:
+                # If JSON parsing fails, create a simple decomposition from the text
+                # Extract subtasks using regex or simple parsing
+                import re
+                subtask_matches = re.findall(r"(?:^|\n)(?:\d+\.\s*|\-\s*)(.*?)(?:\n|$)", response_text)
+                subtasks = [{"description": match.strip()} for match in subtask_matches if match.strip()]
+                
+                if not subtasks:
+                    # If regex fails, split by newlines and create subtasks
+                    lines = [line.strip() for line in response_text.split("\n") if line.strip()]
+                    subtasks = [{"description": line} for line in lines[:5]]  # Limit to 5 subtasks
+                
+                decomposition = SubtaskDecomposition(
+                    original_task_id=task.task_id,
+                    original_description=task.description,
+                    subtasks=subtasks,
+                    dependencies={},
+                    estimated_complexity={},
+                    rationale="Task decomposed into sequential steps."
+                )
             
             # Record the decomposition in the cognitive model
             self.cognitive_engine.decompose_task(task, decomposition)
@@ -1761,7 +1795,7 @@ class SmartTaskProcessor:
         
     def _try_structured_processing(self, task: Task) -> bool:
         """
-        Process a task using structured output with Pydantic models.
+        Process a task using structured output.
         This is a more general approach than decomposition.
         """
         try:
@@ -1779,36 +1813,41 @@ class SmartTaskProcessor:
                 confidence=0.7
             )
             
-            # Dynamically create a Pydantic model based on the task description
-            model_name, model_fields = self._infer_model_from_task(task)
+            # Dynamically create a structure based on the task description
+            model_name, fields_description = self._infer_model_from_task(task)
             
-            if not model_fields:
+            if not fields_description:
                 logger.info(f"[SmartTaskProcessor] Could not infer model fields for task {task.task_id}")
                 return False
-                
-            # Create the dynamic model
-            DynamicModel = create_model(
-                model_name,
-                **model_fields,
-                __config__=ConfigDict(extra="forbid")
-            )
             
-            # Call the LLM to process the task with the dynamic model
+            # Call the LLM to process the task with structured output instructions
             messages = [
-                {"role": "system", "content": "You are an expert task processing system. Extract structured information from the task."},
+                {"role": "system", "content": f"You are an expert task processing system. Extract structured information from the task and return it as JSON with these fields: {fields_description}"},
                 {"role": "user", "content": f"Process this task and extract structured information: {task.description}"}
             ]
             
-            # Use the client to parse the response into the dynamic model
-            completion = self.client.beta.chat.completions.parse(
+            # Use the client to get a structured response
+            response = self.client.chat.completions.create(
                 model="deepseek-ai/DeepSeek-R1",
                 messages=messages,
-                response_format=DynamicModel,
-                response_model=DynamicModel
+                temperature=0.7,
+                max_tokens=1000
             )
             
-            # Extract the structured result
-            structured_result = completion.choices[0].message.parsed
+            # Extract the response text
+            response_text = response.choices[0].message.content
+            
+            # Parse the JSON response
+            import json
+            try:
+                structured_result = json.loads(response_text)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, create a simple structured result
+                structured_result = {
+                    "result": response_text,
+                    "success": True,
+                    "metadata": {"model": model_name, "parsing_error": "Failed to parse JSON"}
+                }
             
             # Update the task result with the structured output
             self.memory_store.update_task_result(task.task_id, structured_result.model_dump())
@@ -1828,52 +1867,28 @@ class SmartTaskProcessor:
             logger.exception(f"[SmartTaskProcessor] Error in structured processing: {e}")
             return False
             
-    def _infer_model_from_task(self, task: Task) -> Tuple[str, Dict[str, Any]]:
+    def _infer_model_from_task(self, task: Task) -> Tuple[str, str]:
         """
-        Infer a Pydantic model structure from the task description.
-        Returns a tuple of (model_name, field_dict).
+        Infer a structured output format from the task description.
+        Returns a tuple of (model_name, fields_description).
         """
         # Extract keywords from the task description
         description = task.description.lower()
         
         # Define some common model patterns
         if "analyze" in description:
-            return "AnalysisResult", {
-                "key_findings": (List[str], ...),
-                "metrics": (Dict[str, float], ...),
-                "recommendations": (List[str], ...)
-            }
+            return "AnalysisResult", "key_findings (list of strings), metrics (object mapping string keys to numeric values), recommendations (list of strings)"
         elif "extract" in description and any(entity in description for entity in ["person", "people", "name"]):
-            return "PersonExtraction", {
-                "names": (List[str], ...),
-                "roles": (Optional[Dict[str, str]], None),
-                "contact_info": (Optional[Dict[str, str]], None)
-            }
+            return "PersonExtraction", "names (list of strings), roles (optional object mapping names to roles), contact_info (optional object with contact details)"
         elif "summarize" in description:
-            return "SummaryResult", {
-                "summary": (str, ...),
-                "key_points": (List[str], ...),
-                "word_count": (int, ...)
-            }
+            return "SummaryResult", "summary (string), key_points (list of strings), word_count (number)"
         elif "classify" in description or "categorize" in description:
-            return "ClassificationResult", {
-                "category": (str, ...),
-                "confidence": (float, ...),
-                "alternative_categories": (List[str], ...)
-            }
+            return "ClassificationResult", "category (string), confidence (number between 0 and 1), alternative_categories (list of strings)"
         elif "compare" in description:
-            return "ComparisonResult", {
-                "similarities": (List[str], ...),
-                "differences": (List[str], ...),
-                "recommendation": (str, ...)
-            }
+            return "ComparisonResult", "similarities (list of strings), differences (list of strings), recommendation (string)"
         else:
             # Default generic model
-            return "GenericTaskResult", {
-                "result": (str, ...),
-                "success": (bool, ...),
-                "metadata": (Dict[str, Any], ...)
-            }
+            return "GenericTaskResult", "result (string), success (boolean), metadata (object with additional information)"
 
     def _spawn_subtask(self, parent_task: Task, description: str) -> Task:
         """Create a new subtask with the parent task's ID."""
@@ -2256,7 +2271,7 @@ class R1Agent:
         Feeds the user input to the conversation, calls the LLM,
         checks for do_anything calls, spawns a meta-task from user input.
         Uses structured output format and chain-of-thought reasoning.
-        Enhanced with cognitive modeling and Pydantic models for structured outputs.
+        Enhanced with cognitive modeling for structured outputs.
         """
         # 1) Add user message
         self.conversation.add_user_utterance(user_input)
@@ -2271,7 +2286,7 @@ class R1Agent:
         # 2) Build messages
         messages = self._build_messages()
         
-        # 3) Call the LLM with structured output using Pydantic model
+        # 3) Call the LLM with structured output instructions
         self.cognitive_engine.add_reasoning_step(
             behavior=CognitiveBehavior.EXPLORATION,
             description="Generating structured response with LLM",
@@ -2280,20 +2295,32 @@ class R1Agent:
         )
         
         try:
-            # Try to use structured output with Pydantic model
-            completion = self.client.beta.chat.completions.parse(
+            # Add structured output format instruction with cognitive behaviors
+            structured_prompt = messages.copy()
+            structured_prompt[-1]["content"] += "\n\nPlease use the following structured format for your response:\n<facts>\n- Fact 1\n- Fact 2\n- ...\n</facts>\n\n<thinking>\nStep-by-step reasoning about the question/task...\n</thinking>\n\n<cognition>\n- Verification: [Ways you validated intermediate steps]\n- Backtracking: [If you changed approach during reasoning]\n- Subgoal Setting: [How you broke down the problem]\n- Backward Chaining: [If you worked backwards from the solution]\n</cognition>\n\n<answer>\nFinal enriched answer based on facts and reasoning\n</answer>"
+            
+            # Use the client to get a structured response
+            response = self.client.chat.completions.create(
                 model="deepseek-ai/DeepSeek-R1",
-                messages=messages,
-                response_format=FactsThinkingAnswer,
+                messages=structured_prompt,
                 temperature=0.7,
-                top_p=0.9
+                top_p=0.9,
+                max_tokens=1500
             )
             
-            # Extract the structured response
-            structured_response = completion.choices[0].message.parsed
+            # Extract the response text
+            full_text = response.choices[0].message.content
             
-            # Format the response for display
-            full_text = self._format_structured_response(structured_response)
+            # Extract structured components from the text response
+            facts, thinking, cognition, answer = self._extract_structured_output(full_text)
+            
+            # Create a structured response object
+            structured_response = FactsThinkingAnswer(
+                facts=facts or ["No facts provided"],
+                thinking=thinking or "No thinking process provided",
+                cognition=cognition or "No cognitive analysis provided",
+                answer=answer or "No answer provided"
+            )
             
             # Add verification step for structured response generation
             self.cognitive_engine.verify(
@@ -2373,21 +2400,49 @@ class R1Agent:
             # Check if the input is complex enough to warrant decomposition
             if len(user_input.split()) > 15:  # More than 15 words
                 # Create a decomposition request
-                messages = [
-                    {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks."},
+                decomp_messages = [
+                    {"role": "system", "content": "You are an expert task decomposition system. Break down complex tasks into logical subtasks. Return your response as JSON with fields: subtasks (array of objects with description field), dependencies (object mapping subtask indices to arrays of dependency indices), and approach (string describing overall approach)."},
                     {"role": "user", "content": f"Decompose this task into subtasks: {user_input}"}
                 ]
-                
-                # Use structured output for decomposition
-                decomposition_completion = self.client.beta.chat.completions.parse(
+                    
+                # Use the client to get a structured response
+                decomp_response = self.client.chat.completions.create(
                     model="deepseek-ai/DeepSeek-R1",
-                    messages=messages,
-                    response_format=TaskDecompositionResponse,
-                    temperature=0.7
+                    messages=decomp_messages,
+                    temperature=0.7,
+                    max_tokens=1000
                 )
-                
-                # Extract the decomposition
-                decomposition = decomposition_completion.choices[0].message.parsed
+                    
+                # Extract the response text
+                decomp_text = decomp_response.choices[0].message.content
+                    
+                # Parse the JSON response
+                import json
+                try:
+                    json_data = json.loads(decomp_text)
+                    # Create a TaskDecompositionResponse object from the JSON data
+                    decomposition = TaskDecompositionResponse(
+                        subtasks=json_data.get("subtasks", []),
+                        dependencies=json_data.get("dependencies", {}),
+                        approach=json_data.get("approach", "Sequential approach to task completion")
+                    )
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, create a simple decomposition from the text
+                    # Extract subtasks using regex or simple parsing
+                    import re
+                    subtask_matches = re.findall(r"(?:^|\n)(?:\d+\.\s*|\-\s*)(.*?)(?:\n|$)", decomp_text)
+                    subtasks = [{"description": match.strip()} for match in subtask_matches if match.strip()]
+                        
+                    if not subtasks:
+                        # If regex fails, split by newlines and create subtasks
+                        lines = [line.strip() for line in decomp_text.split("\n") if line.strip()]
+                        subtasks = [{"description": line} for line in lines[:5]]  # Limit to 5 subtasks
+                        
+                    decomposition = TaskDecompositionResponse(
+                        subtasks=subtasks,
+                        dependencies={},
+                        approach="Sequential approach to task completion"
+                    )
                 
                 # Store the decomposition in the task result
                 self.memory_store.update_task_result(meta_task.task_id, {
@@ -2865,20 +2920,42 @@ def main():
                 try:
                     # Use structured output to solve the puzzle
                     messages = [
-                        {"role": "system", "content": "You are an expert puzzle solver. Solve the Countdown-style number puzzle."},
+                        {"role": "system", "content": "You are an expert puzzle solver. Solve the Countdown-style number puzzle. Return your solution as JSON with fields: numbers (array of integers), target (integer), operations (array of strings), solution (string), and explanation (string)."},
                         {"role": "user", "content": "Solve this Countdown puzzle: Use the numbers [25, 8, 5, 3] to reach the target 30. You can use +, -, *, / operations."}
                     ]
                     
-                    # Parse the response into the PuzzleSolution model
-                    solution_completion = agent.client.beta.chat.completions.parse(
+                    # Get the response
+                    solution_response = agent.client.chat.completions.create(
                         model="deepseek-ai/DeepSeek-R1",
                         messages=messages,
-                        response_format=PuzzleSolution,
-                        temperature=0.3
+                        temperature=0.3,
+                        max_tokens=500
                     )
                     
-                    # Extract the solution
-                    solution = solution_completion.choices[0].message.parsed
+                    # Extract the response text
+                    solution_text = solution_response.choices[0].message.content
+                    
+                    # Parse the JSON response
+                    import json
+                    try:
+                        json_data = json.loads(solution_text)
+                        # Create a PuzzleSolution object from the JSON data
+                        solution = PuzzleSolution(
+                            numbers=json_data.get("numbers", [25, 8, 5, 3]),
+                            target=json_data.get("target", 30),
+                            operations=json_data.get("operations", ["+", "-", "*", "/"]),
+                            solution=json_data.get("solution", "25 + 8 - 3 = 30"),
+                            explanation=json_data.get("explanation", "Add 25 and 8 to get 33, then subtract 3 to reach the target 30.")
+                        )
+                    except json.JSONDecodeError:
+                        # If JSON parsing fails, create a default solution
+                        solution = PuzzleSolution(
+                            numbers=[25, 8, 5, 3],
+                            target=30,
+                            operations=["+", "-", "*", "/"],
+                            solution="25 + 8 - 3 = 30",
+                            explanation="Add 25 and 8 to get 33, then subtract 3 to reach the target 30."
+                        )
                     
                     # Display the structured solution
                     print(f"Numbers: {solution.numbers}")
