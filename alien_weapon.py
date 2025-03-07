@@ -3056,10 +3056,14 @@ class R1Agent:
      - Has cognitive modeling for problem solving
      - Uses structured outputs with Pydantic models
      - Indefinite runtime in main(), shutting down only on user command
+     - Manages token budget with economic reasoning
     """
     def __init__(self):
         # Initialize Together client
         self.client = Together()
+        
+        # Token budget management
+        self.token_budget = TokenBudget(initial_budget=8000)
         
         # Knowledge base
         self.knowledge_base = KnowledgeBase()
@@ -3121,6 +3125,14 @@ class R1Agent:
             "- Decompose complex problems into actionable steps\n"
             "- Take initiative to solve problems rather than stating limitations\n"
             "- Learn from your experiences and improve your capabilities\n\n"
+            "TOKEN BUDGET MANAGEMENT:\n"
+            "You have a limited token budget (initially 8000 tokens) for generating responses. You must:\n"
+            "- Request tokens before each operation phase (thinking, response generation, etc.)\n"
+            "- Track your token usage and stay within budget\n"
+            "- Prioritize high-value operations when budget is limited\n"
+            "- Use <request_tokens> operation: amount </request_tokens> to request tokens\n"
+            "- Use <budget_status/> to check your current budget\n"
+            "- Be economical and efficient with your token usage\n\n"
             "Use these capabilities responsibly and proactively.\n"
             "</META_RECURSIVE_SELF_AWARENESS>\n"
         )
