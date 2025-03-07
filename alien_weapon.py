@@ -878,6 +878,8 @@ class SelfReflectiveCognition:
         self._analyzer_thread = threading.Thread(target=self._analyze_performance_loop, daemon=True)
         self._analyzer_thread.start()
         self.cognitive_engine = CognitiveModelingEngine()
+        # Reference to memory store will be set by the agent
+        self.memory_store = None
 
     def reflect_on_task(self, task: Task) -> None:
         with self._lock:
@@ -958,11 +960,11 @@ class SelfReflectiveCognition:
                     recent = self._reflections[-5:]
                     analysis = "Recent reflections => " + " || ".join(recent)
                     logger.info(f"[SelfReflectiveCognition] {analysis}")
-                else:
+                elif hasattr(self, 'memory_store') and self.memory_store is not None:
                     # Generate a reflection based on current tasks
                     tasks = self.memory_store.list_tasks()
-                    completed_tasks = [t for t in tasks if t.status == "COMPLETED"]
-                    failed_tasks = [t for t in tasks if t.status == "FAILED"]
+                    completed_tasks = [t for t in tasks if t.status == TaskStatus.COMPLETED]
+                    failed_tasks = [t for t in tasks if t.status == TaskStatus.FAILED]
                     reflection = f"Completed {len(completed_tasks)} tasks, {len(failed_tasks)} failed."
                     self._reflections.append(reflection)
                     logger.info(f"[SelfReflectiveCognition] {reflection}")
@@ -1196,14 +1198,86 @@ class PriorityTaskQueue:
             return len(self._heap)
 
 ###############################################################################
-# FUNCTION ADAPTER ("DO ANYTHING")
+# TOKEN REGISTRY AND FUNCTION ADAPTER
 ###############################################################################
+
+class TokenRegistry:
+    """
+    Maintains a registry of token sequences that can be used to trigger code execution.
+    This allows the agent to stream tokens and execute code when specific patterns are detected.
+    """
+    def __init__(self):
+        self._registry = {}
+        self._lock = threading.Lock()
+        self._token_buffer = []
+        self._max_buffer_size = 1000  # Maximum number of tokens to keep in buffer
+        
+    def register_pattern(self, pattern: str, callback: Callable[[str], None]) -> None:
+        """Register a pattern and associated callback function."""
+        with self._lock:
+            self._registry[pattern] = callback
+            
+    def process_token(self, token: str) -> None:
+        """Process a single token, checking for registered patterns."""
+        with self._lock:
+            # Add token to buffer
+            self._token_buffer.append(token)
+            
+            # Trim buffer if it gets too large
+            if len(self._token_buffer) > self._max_buffer_size:
+                self._token_buffer = self._token_buffer[-self._max_buffer_size:]
+            
+            # Check for patterns
+            buffer_text = "".join(self._token_buffer)
+            for pattern, callback in self._registry.items():
+                if pattern in buffer_text:
+                    # Extract the content that matched the pattern
+                    start_idx = buffer_text.find(pattern)
+                    end_idx = start_idx + len(pattern)
+                    matched_content = buffer_text[start_idx:end_idx]
+                    
+                    # Call the callback with the matched content
+                    callback(matched_content)
+                    
+                    # Remove the matched content from the buffer
+                    self._token_buffer = list(buffer_text[:start_idx] + buffer_text[end_idx:])
+    
+    def clear_buffer(self) -> None:
+        """Clear the token buffer."""
+        with self._lock:
+            self._token_buffer = []
 
 class FunctionAdapter:
     """
     The 'do_anything' capability: if the agent sees <function_call> do_anything: <code>...</code>,
     it executes that Python code directly. Highly insecure outside a sandbox.
+    
+    Enhanced with token registry for streaming execution.
     """
+    def __init__(self):
+        self.token_registry = TokenRegistry()
+        
+        # Register patterns for code execution
+        self.token_registry.register_pattern("<function_call> do_anything:", self._handle_do_anything)
+        self.token_registry.register_pattern("```python", self._handle_python_code_block)
+    def _handle_do_anything(self, content: str) -> None:
+        """Handle a do_anything function call pattern."""
+        # Extract the code from the pattern
+        code_match = re.search(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", content, re.DOTALL)
+        if code_match:
+            code = code_match.group(1)
+            # Execute the code
+            self.do_anything(code)
+    
+    def _handle_python_code_block(self, content: str) -> None:
+        """Handle a Python code block pattern."""
+        # Extract the code from the pattern
+        code_match = re.search(r"```python\s*(.*?)```", content, re.DOTALL)
+        if code_match:
+            code = code_match.group(1)
+            # Execute the code
+            self.do_anything(code)
+    
     def do_anything(self, snippet: str) -> Dict[str, Any]:
         code = snippet.strip()
         import re, io, sys
@@ -1216,7 +1290,12 @@ class FunctionAdapter:
         mystdout = io.StringIO()
         sys.stdout = mystdout
         try:
-            exec(code, globals(), locals())
+            # Create a local namespace for execution
+            local_namespace = {}
+            exec(code, globals(), local_namespace)
+            
+            # Extract the result if available
+            result = local_namespace.get('result', None)
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"[do_anything] Error: {str(e)}\nTraceback:\n{tb}")
@@ -1226,6 +1305,7 @@ class FunctionAdapter:
 
         output = mystdout.getvalue()
         logger.info(f"[do_anything] Execution output:\n{output}")
+        
         # Check for additional function calls in output
         new_calls = re.findall(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", output, re.DOTALL)
         if new_calls:
@@ -1233,7 +1313,12 @@ class FunctionAdapter:
             for c in new_calls:
                 self.do_anything(c)
 
-        return {"status": "success", "executed_code": code, "output": output}
+        return {
+            "status": "success", 
+            "executed_code": code, 
+            "output": output,
+            "result": result
+        }
 
     def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
         """
@@ -1448,6 +1533,9 @@ class SmartTaskProcessor:
                 confidence=0.8
             )
             
+            # Stream the exploration process
+            print("\n=== Exploration Rollout ===\n")
+            
             for i, strategy in enumerate(strategies):
                 # Add reasoning step for trying this strategy
                 self.cognitive_engine.add_reasoning_step(
@@ -1457,11 +1545,16 @@ class SmartTaskProcessor:
                     confidence=0.7
                 )
                 
+                # Stream the strategy attempt
+                strategy_name = strategy.__name__.replace('_try_', '')
+                print(f"Strategy {i+1}: {strategy_name}... ", end='', flush=True)
+                
                 # Try the strategy
                 result = strategy(task)
                 
                 if result:
                     # Strategy succeeded
+                    print("SUCCESS ✓")
                     self.cognitive_engine.verify(
                         description=f"Strategy {strategy.__name__}",
                         result="Success",
@@ -1472,12 +1565,15 @@ class SmartTaskProcessor:
                     break  # Exit the loop once a successful strategy is found
                 else:
                     # Strategy didn't apply or failed
+                    print("NOT APPLICABLE")
                     self.cognitive_engine.verify(
                         description=f"Strategy {strategy.__name__}",
                         result="Not applicable",
                         is_correct=None,
                         confidence=0.5
                     )
+            
+            print("\n=========================\n")
             
             # If no strategy worked but we didn't encounter errors, still count as success
             if not success:
@@ -1547,6 +1643,15 @@ class SmartTaskProcessor:
                     metadata={"generated_code": generated_code[:100] + "..." if len(generated_code) > 100 else generated_code},
                     confidence=0.8
                 )
+                
+                # Stream the generated code
+                print("\n=== Generated Code ===\n")
+                print(generated_code)
+                print("\n======================\n")
+                
+                # Process the generated code through the token registry
+                for token in generated_code:
+                    self.function_adapter.token_registry.process_token(token)
                 
                 # Execute the generated code
                 result = self.function_adapter.do_anything(generated_code)
@@ -2310,6 +2415,8 @@ class R1Agent:
         
         # Initialize the self-reflective cognition with cognitive modeling capabilities
         self.reflection = SelfReflectiveCognition()
+        # Set memory_store reference in reflection
+        self.reflection.memory_store = self.memory_store
         
         # Get a direct reference to the cognitive engine for the agent
         self.cognitive_engine = self.reflection.cognitive_engine
@@ -2479,9 +2586,16 @@ class R1Agent:
             print("\n=== Streaming Response ===\n")
             for chunk in response_stream:
                 token = chunk.choices[0].delta.content
-                streamed_response.append(token)
-                print(token, end='', flush=True)
+                if token:
+                    streamed_response.append(token)
+                    print(token, end='', flush=True)
+                    
+                    # Process token through registry for potential code execution
+                    self.function_adapter.token_registry.process_token(token)
             print("\n\n=========================\n")
+            
+            # Clear the token buffer after processing the response
+            self.function_adapter.token_registry.clear_buffer()
             
             full_text = "".join(streamed_response)
             
