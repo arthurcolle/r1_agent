@@ -503,6 +503,14 @@ class CognitiveBehavior(str, Enum):
     CREATIVITY = "creativity"
     ABSTRACTION = "abstraction"
     ANALOGY = "analogy"
+    COUNTERFACTUAL = "counterfactual"
+    METACOGNITION = "metacognition"
+    UNCERTAINTY = "uncertainty"
+    CAUSAL_REASONING = "causal_reasoning"
+    HYPOTHESIS_TESTING = "hypothesis_testing"
+    ABDUCTIVE_REASONING = "abductive_reasoning"
+    DEDUCTIVE_REASONING = "deductive_reasoning"
+    INDUCTIVE_REASONING = "inductive_reasoning"
 
 
 class ReasoningStep(BaseModel):
@@ -640,11 +648,29 @@ class CognitiveModelingEngine:
     """
     Engine for modeling and executing cognitive behaviors in the agent.
     This is model-agnostic and can work with any LLM backend.
+    Features:
+    - Advanced chain-of-thought reasoning
+    - Parallel reasoning paths
+    - Confidence calibration
+    - Uncertainty quantification
+    - Counterfactual reasoning
+    - Metacognitive monitoring
+    - Reasoning path optimization
     """
     def __init__(self):
         self._chain_of_thought: ChainOfThought = ChainOfThought()
         self._current_step: int = 0
         self._lock = threading.Lock()
+        self._reasoning_paths: Dict[str, List[ReasoningStep]] = {}
+        self._active_path: str = "main"
+        self._path_confidences: Dict[str, float] = {"main": 1.0}
+        self._uncertainty_metrics: Dict[str, float] = {}
+        self._metacognitive_state: Dict[str, Any] = {
+            "calibration_score": 1.0,
+            "reasoning_efficiency": 1.0,
+            "path_diversity": 0.0,
+            "last_calibration": time.time()
+        }
         
     def add_reasoning_step(
         self,
@@ -653,12 +679,33 @@ class CognitiveModelingEngine:
         result: Optional[Union[str, float, Dict[str, Any]]] = None,
         is_correct: Optional[bool] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        confidence: float = 0.5
+        confidence: float = 0.5,
+        path: str = None
     ) -> ReasoningStep:
         """
         Add a new reasoning step to the chain-of-thought.
+        
+        Args:
+            behavior: The cognitive behavior for this step
+            description: Textual description of the step
+            result: Optional result or outcome of the step
+            is_correct: Whether the result is correct
+            metadata: Additional metadata for the step
+            confidence: Confidence level in this reasoning step (0.0 to 1.0)
+            path: Optional reasoning path identifier (defaults to active path)
+            
+        Returns:
+            The created reasoning step
         """
         with self._lock:
+            # Use specified path or active path
+            current_path = path or self._active_path
+            
+            # Create path if it doesn't exist
+            if current_path not in self._reasoning_paths:
+                self._reasoning_paths[current_path] = []
+                self._path_confidences[current_path] = confidence
+            
             self._current_step += 1
             step = ReasoningStep(
                 step_number=self._current_step,
@@ -669,134 +716,474 @@ class CognitiveModelingEngine:
                 metadata=metadata or {},
                 confidence=confidence
             )
+            
+            # Add to both main chain and path-specific chain
             self._chain_of_thought.add_step(step)
-            logger.info(f"[CognitiveModelingEngine] Added reasoning step {self._current_step}: {behavior} - {description}")
+            self._reasoning_paths[current_path].append(step)
+            
+            # Update path confidence based on step confidence
+            self._path_confidences[current_path] = (
+                self._path_confidences[current_path] * 0.8 + confidence * 0.2
+            )
+            
+            # Update metacognitive state
+            self._update_metacognition(step, current_path)
+            
+            logger.info(f"[CognitiveModelingEngine] Added reasoning step {self._current_step}: {behavior} - {description} (path: {current_path}, confidence: {confidence:.2f})")
             return step
+            
+    def _update_metacognition(self, step: ReasoningStep, path: str) -> None:
+        """Update metacognitive monitoring metrics based on new reasoning step"""
+        # Update calibration score if we have ground truth
+        if step.is_correct is not None:
+            # Calculate calibration error (confidence vs correctness)
+            calibration_error = abs(float(step.is_correct) - step.confidence)
+            # Update calibration score (higher is better)
+            self._metacognitive_state["calibration_score"] = (
+                self._metacognitive_state["calibration_score"] * 0.9 + 
+                (1.0 - calibration_error) * 0.1
+            )
+            
+        # Update path diversity metric
+        self._metacognitive_state["path_diversity"] = len(self._reasoning_paths) / 10.0
+        
+        # Periodically recalibrate confidence if needed
+        if time.time() - self._metacognitive_state["last_calibration"] > 300:  # 5 minutes
+            self._recalibrate_confidence()
+            self._metacognitive_state["last_calibration"] = time.time()
     
-    def verify(self, description: str, result: Any, is_correct: bool = None, confidence: float = 0.8) -> ReasoningStep:
+    def create_reasoning_path(self, path_id: str, description: str, 
+                             initial_confidence: float = 0.5) -> str:
+        """
+        Create a new reasoning path for exploring alternative hypotheses.
+        
+        Args:
+            path_id: Unique identifier for the path
+            description: Description of this reasoning path
+            initial_confidence: Initial confidence in this path
+            
+        Returns:
+            The path ID
+        """
+        with self._lock:
+            if path_id in self._reasoning_paths:
+                # Path already exists, return existing ID
+                return path_id
+                
+            # Create new path
+            self._reasoning_paths[path_id] = []
+            self._path_confidences[path_id] = initial_confidence
+            
+            # Add a metadata step to the main chain
+            self.add_reasoning_step(
+                behavior=CognitiveBehavior.EXPLORATION,
+                description=f"Created alternative reasoning path: {description}",
+                metadata={"path_id": path_id, "type": "path_creation"},
+                confidence=initial_confidence,
+                path="main"  # Always add to main path
+            )
+            
+            logger.info(f"[CognitiveModelingEngine] Created new reasoning path: {path_id}")
+            return path_id
+            
+    def switch_reasoning_path(self, path_id: str) -> bool:
+        """
+        Switch to a different reasoning path.
+        
+        Args:
+            path_id: The path ID to switch to
+            
+        Returns:
+            Success status
+        """
+        with self._lock:
+            if path_id not in self._reasoning_paths:
+                logger.warning(f"[CognitiveModelingEngine] Cannot switch to non-existent path: {path_id}")
+                return False
+                
+            self._active_path = path_id
+            logger.info(f"[CognitiveModelingEngine] Switched to reasoning path: {path_id}")
+            return True
+            
+    def get_best_reasoning_path(self) -> str:
+        """
+        Get the reasoning path with highest confidence.
+        
+        Returns:
+            Path ID of the highest confidence path
+        """
+        with self._lock:
+            if not self._path_confidences:
+                return "main"
+                
+            return max(self._path_confidences.items(), key=lambda x: x[1])[0]
+            
+    def merge_reasoning_paths(self, source_path: str, target_path: str = "main") -> bool:
+        """
+        Merge steps from source path into target path.
+        
+        Args:
+            source_path: Path to merge from
+            target_path: Path to merge into (defaults to main)
+            
+        Returns:
+            Success status
+        """
+        with self._lock:
+            if source_path not in self._reasoning_paths:
+                logger.warning(f"[CognitiveModelingEngine] Source path does not exist: {source_path}")
+                return False
+                
+            if target_path not in self._reasoning_paths:
+                logger.warning(f"[CognitiveModelingEngine] Target path does not exist: {target_path}")
+                return False
+                
+            # Add steps from source to target
+            for step in self._reasoning_paths[source_path]:
+                # Skip steps already in target path
+                if step not in self._reasoning_paths[target_path]:
+                    self._reasoning_paths[target_path].append(step)
+                    
+            # Update target path confidence
+            source_conf = self._path_confidences[source_path]
+            target_conf = self._path_confidences[target_path]
+            self._path_confidences[target_path] = max(source_conf, target_conf)
+            
+            logger.info(f"[CognitiveModelingEngine] Merged path {source_path} into {target_path}")
+            return True
+            
+    def _recalibrate_confidence(self) -> None:
+        """Recalibrate confidence scores based on historical accuracy"""
+        # Skip if we don't have enough data
+        if self._current_step < 5:
+            return
+            
+        # Calculate calibration factor based on historical accuracy
+        calibration_factor = self._metacognitive_state["calibration_score"]
+        
+        # Apply calibration to all path confidences
+        for path_id in self._path_confidences:
+            raw_confidence = self._path_confidences[path_id]
+            calibrated = raw_confidence * calibration_factor
+            self._path_confidences[path_id] = calibrated
+            
+        logger.info(f"[CognitiveModelingEngine] Recalibrated confidence scores with factor {calibration_factor:.2f}")
+
+    def verify(self, description: str, result: Any, is_correct: bool = None, 
+              confidence: float = 0.8, path: str = None) -> ReasoningStep:
         """
         Execute verification behavior: check if a result or intermediate step is correct.
+        
+        Args:
+            description: What is being verified
+            result: The result being verified
+            is_correct: Whether the result is correct
+            confidence: Confidence in the verification
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.VERIFICATION,
             description=f"Verifying: {description}",
             result=result,
             is_correct=is_correct,
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
     
-    def backtrack(self, reason: str, confidence: float = 0.7) -> ReasoningStep:
+    def backtrack(self, reason: str, confidence: float = 0.7, path: str = None) -> ReasoningStep:
         """
         Execute backtracking behavior: abandon a failing approach and try another.
+        
+        Args:
+            reason: Reason for backtracking
+            confidence: Confidence in the backtracking decision
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
+        # When backtracking, create a new path to explore alternative
+        if path is None and self._active_path == "main":
+            new_path_id = f"alternative_{len(self._reasoning_paths)}"
+            self.create_reasoning_path(new_path_id, f"Alternative after backtracking: {reason}", confidence)
+            self.switch_reasoning_path(new_path_id)
+            path = new_path_id
+        
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.BACKTRACKING,
             description=f"Backtracking: {reason}",
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
     
-    def set_subgoal(self, subgoal: str, metadata: Optional[Dict[str, Any]] = None, confidence: float = 0.8) -> ReasoningStep:
+    def set_subgoal(self, subgoal: str, metadata: Optional[Dict[str, Any]] = None, 
+                   confidence: float = 0.8, path: str = None) -> ReasoningStep:
         """
         Execute subgoal setting behavior: break a problem into smaller, manageable parts.
+        
+        Args:
+            subgoal: The subgoal to set
+            metadata: Additional metadata
+            confidence: Confidence in this subgoal
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.SUBGOAL_SETTING,
             description=f"Setting subgoal: {subgoal}",
             metadata=metadata,
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
     
-    def backward_chain(self, target: str, steps: Optional[List[str]] = None, confidence: float = 0.75) -> ReasoningStep:
+    def backward_chain(self, target: str, steps: Optional[List[str]] = None, 
+                      confidence: float = 0.75, path: str = None) -> ReasoningStep:
         """
         Execute backward chaining behavior: start from the goal and work backwards.
+        
+        Args:
+            target: The goal to work backwards from
+            steps: Optional list of steps in the backward chain
+            confidence: Confidence in this backward chaining
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         metadata = {"steps": steps} if steps else {}
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.BACKWARD_CHAINING,
             description=f"Backward chaining toward: {target}",
             metadata=metadata,
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
     
-    def reflect(self, reflection: str, subject: Optional[str] = None, confidence: float = 0.6) -> ReasoningStep:
+    def reflect(self, reflection: str, subject: Optional[str] = None, 
+               confidence: float = 0.6, path: str = None) -> ReasoningStep:
         """
         Execute reflection behavior: analyze past performance and learn from it.
+        
+        Args:
+            reflection: The reflection content
+            subject: Optional subject of reflection
+            confidence: Confidence in this reflection
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         metadata = {"subject": subject} if subject else {}
+        
+        # Update metacognitive state based on reflection
+        self._metacognitive_state["reasoning_efficiency"] += 0.05
+        
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.REFLECTION,
             description=reflection,
             metadata=metadata,
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
     
-    def explore(self, strategy: str, options: Optional[List[str]] = None, confidence: float = 0.5) -> ReasoningStep:
+    def explore(self, strategy: str, options: Optional[List[str]] = None, 
+               confidence: float = 0.5, create_paths: bool = False, path: str = None) -> ReasoningStep:
         """
         Execute exploration behavior: try different approaches to solve a problem.
+        
+        Args:
+            strategy: The exploration strategy
+            options: Optional list of options to explore
+            confidence: Confidence in this exploration
+            create_paths: Whether to create separate reasoning paths for each option
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         metadata = {"options": options} if options else {}
+        
+        # Create separate reasoning paths for each option if requested
+        if create_paths and options:
+            for i, option in enumerate(options):
+                option_path_id = f"option_{i}_{int(time.time())}"
+                self.create_reasoning_path(
+                    option_path_id, 
+                    f"Exploring option: {option}", 
+                    confidence * 0.8  # Slightly lower initial confidence for exploration paths
+                )
+                
+                # Add first step to the new path
+                self.add_reasoning_step(
+                    behavior=CognitiveBehavior.EXPLORATION,
+                    description=f"Exploring option: {option}",
+                    metadata={"strategy": strategy, "option_index": i},
+                    confidence=confidence * 0.8,
+                    path=option_path_id
+                )
+                
+            metadata["created_paths"] = True
+        
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.EXPLORATION,
             description=f"Exploring strategy: {strategy}",
             metadata=metadata,
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
         
-    def plan(self, plan: str, steps: List[str], confidence: float = 0.7) -> ReasoningStep:
+    def plan(self, plan: str, steps: List[str], confidence: float = 0.7, 
+            path: str = None) -> ReasoningStep:
         """
         Execute planning behavior: create a sequence of steps to achieve a goal.
+        
+        Args:
+            plan: The plan description
+            steps: List of steps in the plan
+            confidence: Confidence in this plan
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.PLANNING,
             description=f"Planning: {plan}",
             metadata={"steps": steps},
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
         
-    def evaluate(self, evaluation: str, criteria: List[str], score: float, confidence: float = 0.6) -> ReasoningStep:
+    def evaluate(self, evaluation: str, criteria: List[str], score: float, 
+                confidence: float = 0.6, path: str = None) -> ReasoningStep:
         """
         Execute evaluation behavior: assess options against criteria.
+        
+        Args:
+            evaluation: What is being evaluated
+            criteria: List of evaluation criteria
+            score: Evaluation score
+            confidence: Confidence in this evaluation
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.EVALUATION,
             description=f"Evaluating: {evaluation}",
             result=score,
             metadata={"criteria": criteria},
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
         
-    def create(self, creation: str, inspiration: Optional[str] = None, confidence: float = 0.4) -> ReasoningStep:
+    def create(self, creation: str, inspiration: Optional[str] = None, 
+              confidence: float = 0.4, path: str = None) -> ReasoningStep:
         """
         Execute creativity behavior: generate novel ideas or solutions.
+        
+        Args:
+            creation: The creative output
+            inspiration: Optional inspiration source
+            confidence: Confidence in this creation
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         metadata = {"inspiration": inspiration} if inspiration else {}
+        
+        # For creative steps, consider creating a new path to explore the creative direction
+        if path is None and random.random() < 0.3:  # 30% chance to create new path
+            creative_path = f"creative_{int(time.time())}"
+            self.create_reasoning_path(creative_path, f"Creative exploration: {creation[:30]}...", confidence)
+            path = creative_path
+        
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.CREATIVITY,
             description=f"Creating: {creation}",
             metadata=metadata,
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
         
-    def abstract(self, abstraction: str, from_concrete: str, confidence: float = 0.6) -> ReasoningStep:
+    def abstract(self, abstraction: str, from_concrete: str, 
+                confidence: float = 0.6, path: str = None) -> ReasoningStep:
         """
         Execute abstraction behavior: identify patterns and generalize.
+        
+        Args:
+            abstraction: The abstraction being made
+            from_concrete: The concrete example being abstracted from
+            confidence: Confidence in this abstraction
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.ABSTRACTION,
             description=f"Abstracting: {abstraction}",
             metadata={"from_concrete": from_concrete},
-            confidence=confidence
+            confidence=confidence,
+            path=path
         )
         
-    def draw_analogy(self, analogy: str, source: str, target: str, confidence: float = 0.5) -> ReasoningStep:
+    def draw_analogy(self, analogy: str, source: str, target: str, 
+                    confidence: float = 0.5, path: str = None) -> ReasoningStep:
         """
         Execute analogy behavior: transfer knowledge from one domain to another.
+        
+        Args:
+            analogy: The analogy being drawn
+            source: Source domain of the analogy
+            target: Target domain of the analogy
+            confidence: Confidence in this analogy
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
         """
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.ANALOGY,
             description=f"Drawing analogy: {analogy}",
             metadata={"source": source, "target": target},
-            confidence=confidence
+            confidence=confidence,
+            path=path
+        )
+        
+    def counterfactual(self, premise: str, consequence: str, 
+                      confidence: float = 0.4, path: str = None) -> ReasoningStep:
+        """
+        Execute counterfactual reasoning: explore what would happen if something were different.
+        
+        Args:
+            premise: The counterfactual premise
+            consequence: The consequence of the counterfactual
+            confidence: Confidence in this counterfactual reasoning
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        # Always create a new path for counterfactuals if none specified
+        if path is None:
+            cf_path = f"counterfactual_{int(time.time())}"
+            self.create_reasoning_path(cf_path, f"Counterfactual: {premise}", confidence)
+            path = cf_path
+            
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.EXPLORATION,  # Use exploration behavior type
+            description=f"Counterfactual reasoning: If {premise}, then {consequence}",
+            metadata={"counterfactual": True, "premise": premise, "consequence": consequence},
+            confidence=confidence,
+            path=path
         )
 
     def get_chain_of_thought(self) -> ChainOfThought:
@@ -804,41 +1191,117 @@ class CognitiveModelingEngine:
         with self._lock:
             return self._chain_of_thought
             
+    def get_reasoning_path(self, path_id: str) -> List[ReasoningStep]:
+        """
+        Get all steps in a specific reasoning path.
+        
+        Args:
+            path_id: The path ID to retrieve
+            
+        Returns:
+            List of reasoning steps in the path
+        """
+        with self._lock:
+            if path_id not in self._reasoning_paths:
+                return []
+            return list(self._reasoning_paths[path_id])
+            
     def update_chain_summary(self, summary: str) -> None:
         """Update the summary of the reasoning chain."""
         with self._lock:
             self._chain_of_thought.update_summary(summary)
             
-    def set_conclusion(self, conclusion: str, confidence: float = None) -> None:
-        """Set the final conclusion of the reasoning chain."""
+    def set_conclusion(self, conclusion: str, confidence: float = None, 
+                      from_best_path: bool = True) -> None:
+        """
+        Set the final conclusion of the reasoning chain.
+        
+        Args:
+            conclusion: The conclusion text
+            confidence: Optional confidence level
+            from_best_path: Whether to use the best path's confidence
+        """
         with self._lock:
+            if from_best_path and confidence is None:
+                # Use confidence from best path
+                best_path = self.get_best_reasoning_path()
+                if best_path in self._path_confidences:
+                    confidence = self._path_confidences[best_path]
+                    
             self._chain_of_thought.set_conclusion(conclusion, confidence)
     
-    def get_reasoning_summary(self) -> str:
+    def get_reasoning_summary(self, include_paths: bool = False) -> str:
         """
         Generate a summary of the reasoning process so far.
+        
+        Args:
+            include_paths: Whether to include details about reasoning paths
+            
+        Returns:
+            Formatted summary string
         """
         with self._lock:
-            if self._chain_of_thought.summary:
+            if self._chain_of_thought.summary and not include_paths:
                 return self._chain_of_thought.summary
                 
             summary = []
+            
+            # Add metacognitive state summary
+            summary.append("=== Metacognitive State ===")
+            summary.append(f"Calibration Score: {self._metacognitive_state['calibration_score']:.2f}")
+            summary.append(f"Reasoning Efficiency: {self._metacognitive_state['reasoning_efficiency']:.2f}")
+            summary.append(f"Path Diversity: {self._metacognitive_state['path_diversity']:.2f}")
+            summary.append(f"Active Path: {self._active_path}")
+            summary.append(f"Total Paths: {len(self._reasoning_paths)}")
+            summary.append("")
+            
+            # Add main reasoning chain
+            summary.append("=== Main Reasoning Chain ===")
             for step in self._chain_of_thought.steps:
                 result_str = f" → {step.result}" if step.result is not None else ""
                 correctness = " ✓" if step.is_correct else " ✗" if step.is_correct is False else ""
                 confidence_str = f" (confidence: {step.confidence:.2f})"
                 summary.append(f"Step {step.step_number} ({step.behavior}): {step.description}{result_str}{correctness}{confidence_str}")
+            
+            # Add path details if requested
+            if include_paths and len(self._reasoning_paths) > 1:
+                summary.append("\n=== Reasoning Paths ===")
+                for path_id, steps in self._reasoning_paths.items():
+                    if path_id == "main":
+                        continue  # Skip main path as it's already shown
+                        
+                    confidence = self._path_confidences.get(path_id, 0.0)
+                    summary.append(f"\nPath: {path_id} (confidence: {confidence:.2f})")
+                    
+                    # Show steps in this path
+                    for i, step in enumerate(steps):
+                        result_str = f" → {step.result}" if step.result is not None else ""
+                        summary.append(f"  {i+1}. ({step.behavior}): {step.description}{result_str}")
                 
+            # Add conclusion
             if self._chain_of_thought.conclusion:
                 summary.append(f"\nConclusion: {self._chain_of_thought.conclusion} (overall confidence: {self._chain_of_thought.confidence:.2f})")
                 
             return "\n".join(summary)
             
+    def get_metacognitive_state(self) -> Dict[str, Any]:
+        """Get the current metacognitive monitoring state"""
+        with self._lock:
+            return self._metacognitive_state.copy()
+            
     def decompose_task(self, task: Task, decomposition: SubtaskDecomposition) -> None:
         """
         Record a structured task decomposition in the cognitive model.
+        
+        Args:
+            task: The task being decomposed
+            decomposition: The structured decomposition
         """
         with self._lock:
+            # Create a dedicated path for this decomposition
+            decomp_path = f"decomposition_{task.task_id}"
+            self.create_reasoning_path(decomp_path, f"Task decomposition for task {task.task_id}", 0.9)
+            
             # Add a subgoal setting step for the decomposition
             self.set_subgoal(
                 subgoal=f"Decompose task {task.task_id} into subtasks",
@@ -847,7 +1310,8 @@ class CognitiveModelingEngine:
                     "num_subtasks": len(decomposition.subtasks),
                     "rationale": decomposition.rationale
                 },
-                confidence=0.9
+                confidence=0.9,
+                path=decomp_path
             )
             
             # Add a step for each subtask
@@ -863,8 +1327,12 @@ class CognitiveModelingEngine:
                         "complexity": complexity,
                         "dependencies": dependencies
                     },
-                    confidence=0.85
+                    confidence=0.85,
+                    path=decomp_path
                 )
+            
+            # Merge the decomposition path back to main
+            self.merge_reasoning_paths(decomp_path, "main")
 
 
 class SelfReflectiveCognition:
