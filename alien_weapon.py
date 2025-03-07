@@ -1643,6 +1643,58 @@ class InMemoryCodeArchive:
     def __init__(self):
         self._snippets: Dict[str, str] = {}
         self._lock = threading.Lock()
+    
+    def read_from_file(self, filepath: str) -> None:
+        """Read code from a file and store it as a snippet."""
+        try:
+            with open(filepath, 'r') as f:
+                content = f.read()
+            snippet_name = os.path.basename(filepath)
+            self.add_snippet(snippet_name, content)
+            logger.info(f"[InMemoryCodeArchive] Read code from {filepath} and stored as snippet '{snippet_name}'")
+        except Exception as e:
+            logger.error(f"[InMemoryCodeArchive] Error reading from file {filepath}: {e}")
+    
+    def write_to_file(self, snippet_name: str, filepath: str) -> None:
+        """Write a stored snippet to a file."""
+        code = self.get_snippet(snippet_name)
+        if code is None:
+            logger.warning(f"[InMemoryCodeArchive] Snippet '{snippet_name}' not found.")
+            return
+        try:
+            with open(filepath, 'w') as f:
+                f.write(code)
+            logger.info(f"[InMemoryCodeArchive] Wrote snippet '{snippet_name}' to file {filepath}")
+        except Exception as e:
+            logger.error(f"[InMemoryCodeArchive] Error writing snippet '{snippet_name}' to file {filepath}: {e}")
+    
+    def incremental_search(self, query: str) -> List[str]:
+        """Perform an incremental search for the query in stored snippets."""
+        matches = []
+        with self._lock:
+            for name, code in self._snippets.items():
+                if query in code:
+                    matches.append(name)
+        return matches
+    
+    def incremental_search_generator(self, query: str, chunk_size: int = 50) -> str:
+        """Yield code chunks containing the query in stored snippets."""
+        with self._lock:
+            for name, code in self._snippets.items():
+                lines = code.split('\n')
+                buffer = []
+                for line in lines:
+                    buffer.append(line)
+                    if len(buffer) >= chunk_size:
+                        chunk = '\n'.join(buffer)
+                        if query in chunk:
+                            yield (name, chunk)
+                        buffer = []
+                # final partial chunk
+                if buffer:
+                    chunk = '\n'.join(buffer)
+                    if query in chunk:
+                        yield (name, chunk)
 
     def add_snippet(self, name: str, code: str) -> None:
         with self._lock:
