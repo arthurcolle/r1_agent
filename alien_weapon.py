@@ -29,6 +29,7 @@ import subprocess
 import requests
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, Future
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union
 from pydantic import BaseModel, Field
 from together import Together
