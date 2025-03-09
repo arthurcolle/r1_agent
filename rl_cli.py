@@ -3334,6 +3334,82 @@ class Agent(BaseModel):
         if not self._reflection_running:
             await self.start_reflections()
 
+        # Check if this is a polymorphic transformation request
+        if any(term in question.lower() for term in ["polymorphic", "transform code", "morph code", "code morphing"]):
+            print("\n🧬 Polymorphic transformation request detected. Initiating code morphing...", flush=True)
+            
+            # Extract target from question
+            import re
+            target_match = re.search(r"transform\s+(\w+(?:\.\w+)*)", question.lower())
+            target_file = None
+            
+            if target_match:
+                target_component = target_match.group(1)
+                # Try to find the file containing this component
+                code_chunks = await self.retrieve_relevant_code(target_component)
+                if code_chunks:
+                    # Extract file path from the code chunks if possible
+                    file_match = re.search(r"File: ([^\)]+)", code_chunks)
+                    if file_match:
+                        target_file = file_match.group(1).strip()
+            
+            # If no specific target, use the main file
+            if not target_file:
+                target_file = __file__
+                
+            try:
+                # Import the polymorphic engine
+                from polymorphic_engine import PolymorphicEngine, TransformationType
+                
+                # Create the engine
+                engine = PolymorphicEngine()
+                
+                # Determine intensity from the question
+                intensity = 0.5  # Default
+                if "aggressive" in question.lower() or "high intensity" in question.lower():
+                    intensity = 0.8
+                elif "subtle" in question.lower() or "low intensity" in question.lower():
+                    intensity = 0.3
+                
+                # Determine transformation types from the question
+                transformation_types = []
+                if "rename variables" in question.lower():
+                    transformation_types.append(TransformationType.RENAME_VARIABLES)
+                if "reorder" in question.lower():
+                    transformation_types.append(TransformationType.REORDER_STATEMENTS)
+                if "control flow" in question.lower():
+                    transformation_types.append(TransformationType.CHANGE_CONTROL_FLOW)
+                if "dead code" in question.lower():
+                    transformation_types.append(TransformationType.ADD_DEAD_CODE)
+                
+                # If no specific types mentioned, use all
+                if not transformation_types:
+                    transformation_types = None
+                
+                print(f"\n🧬 Applying polymorphic transformations to {target_file} with intensity {intensity}...", flush=True)
+                
+                # Apply the transformation
+                success, message = engine.transform_file(
+                    target_file, 
+                    transformation_types=transformation_types,
+                    intensity=intensity
+                )
+                
+                if success:
+                    print(f"\n✅ Transformation successful: {message}", flush=True)
+                    return (f"Successfully applied polymorphic transformations to {target_file}. "
+                           f"{message}. The code structure has been modified while preserving functionality. "
+                           f"You may need to restart the agent to see the effects.")
+                else:
+                    print(f"\n❌ Transformation failed: {message}", flush=True)
+                    return f"I attempted to apply polymorphic transformations but encountered an error: {message}"
+                    
+            except ImportError:
+                return "The polymorphic engine module is not available. Please ensure it's properly installed."
+            except Exception as e:
+                print(f"\n❌ Error during polymorphic transformation: {str(e)}", flush=True)
+                return f"An error occurred during the polymorphic transformation: {str(e)}"
+
         # Check if this is a self-modification request
         if any(term in question.lower() for term in ["modify yourself", "improve your code", "self-modify", "update your code"]):
             print("\n🔄 Self-modification request detected. Initiating code transformation...", flush=True)
@@ -3385,6 +3461,40 @@ class Agent(BaseModel):
                                f"The changes were not applied to ensure system stability.")
                 else:
                     return f"I attempted to create a test instance for the code changes, but failed. The changes were not applied."
+        
+        # Check if this is a weather-related query
+        if any(term in question.lower() for term in ["weather", "temperature", "forecast", "rain", "snow", "sunny"]):
+            # Extract location from the question
+            import re
+            location_match = re.search(r"weather\s+in\s+([A-Za-z\s,]+)", question.lower())
+            
+            if location_match:
+                location = location_match.group(1).strip()
+                print(f"\n🌤️ Weather query detected for location: {location}", flush=True)
+                
+                try:
+                    # Try to get weather data
+                    if "get_weather" in self.system_tools:
+                        weather_data = await self.system_tools["get_weather"](location)
+                        
+                        if weather_data and "error" not in weather_data:
+                            # Extract weather information
+                            if "main" in weather_data and "weather" in weather_data:
+                                temp = weather_data["main"].get("temp", "N/A")
+                                description = weather_data["weather"][0].get("description", "unknown") if weather_data["weather"] else "unknown"
+                                
+                                # Format the response
+                                weather_response = f"The current weather in {location} is {description} with an approximate temperature of {temp}°F."
+                                
+                                # Add to conversation and return
+                                await self.add_to_conversation(conv_id, "assistant", weather_response)
+                                return weather_response
+                    
+                    # If we get here, either the tool failed or we don't have it
+                    # Continue with normal processing
+                    print("\n⚠️ Weather tool unavailable or failed, falling back to standard processing", flush=True)
+                except Exception as e:
+                    print(f"\n❌ Error getting weather data: {str(e)}", flush=True)
         
         # Process with chain-of-thought
         cot = await self.analyze_thought_process(question)
@@ -4538,6 +4648,7 @@ class AgentCLI(cmd.Cmd):
 ║   Type 'help' or '?' to list commands                           ║
 ║   Type 'dashboard' to launch the interactive dashboard           ║
 ║   Type 'chat <message>' to interact with the agent               ║
+║   Type 'polymorphic' to apply code transformations               ║
 ║   Type 'exit' to quit                                            ║
 ║                                                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -4765,6 +4876,132 @@ class AgentCLI(cmd.Cmd):
                 print(f"\nSelf-modification result: {result}")
             except Exception as e:
                 print(f"Error during self-modification: {e}")
+                
+        def do_polymorphic(self, arg):
+            """Apply polymorphic transformations to code: polymorphic [file_path] [intensity]"""
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: polymorphic [file_path] [intensity]")
+                return
+                
+            file_path = args[0]
+            intensity = float(args[1]) if len(args) > 1 else 0.5
+            
+            try:
+                # Import the polymorphic engine
+                from polymorphic_engine import PolymorphicEngine
+                
+                # Create the engine
+                engine = PolymorphicEngine()
+                
+                print(f"Applying polymorphic transformations to {file_path} with intensity {intensity}...")
+                
+                # Apply the transformation
+                success, message = engine.transform_file(file_path, intensity=intensity)
+                
+                if success:
+                    print(f"Transformation successful: {message}")
+                else:
+                    print(f"Transformation failed: {message}")
+                    
+            except ImportError:
+                print("The polymorphic engine module is not available. Please ensure it's properly installed.")
+            except Exception as e:
+                print(f"Error during polymorphic transformation: {e}")
+                print(traceback.format_exc())
+                
+        def do_analyze_code(self, arg):
+            """Analyze code structure: analyze_code [file_path]"""
+            if not arg:
+                print("Usage: analyze_code [file_path]")
+                return
+                
+            file_path = arg.strip()
+            
+            try:
+                # Import the polymorphic engine
+                from polymorphic_engine import PolymorphicEngine
+                
+                # Create the engine
+                engine = PolymorphicEngine()
+                
+                print(f"Analyzing code structure of {file_path}...")
+                
+                # Analyze the file
+                results = engine.analyze_file(file_path)
+                
+                if "error" in results:
+                    print(f"Analysis failed: {results['error']}")
+                    return
+                    
+                # Print summary
+                print("\n=== Code Analysis Summary ===")
+                print(f"File: {file_path}")
+                print(f"Lines of code: {results['loc']}")
+                print(f"Complexity: {results['complexity']}")
+                print(f"Functions: {len(results['functions'])}")
+                print(f"Classes: {len(results['classes'])}")
+                print(f"Imports: {len(results['imports'])}")
+                
+                # Print detailed function info
+                if results['functions']:
+                    print("\n=== Functions ===")
+                    for name, info in results['functions'].items():
+                        print(f"  {name}:")
+                        print(f"    Lines: {info['line']}-{info['end_line']}")
+                        print(f"    Complexity: {info['complexity']}")
+                        print(f"    Arguments: {info['args']}")
+                        
+                # Print detailed class info
+                if results['classes']:
+                    print("\n=== Classes ===")
+                    for name, info in results['classes'].items():
+                        print(f"  {name}:")
+                        print(f"    Lines: {info['line']}-{info['end_line']}")
+                        print(f"    Bases: {info['bases']}")
+                        print(f"    Methods: {info['methods']}")
+                        
+            except ImportError:
+                print("The polymorphic engine module is not available. Please ensure it's properly installed.")
+            except Exception as e:
+                print(f"Error analyzing code: {e}")
+                print(traceback.format_exc())
+                
+        def do_generate_variants(self, arg):
+            """Generate code variants: generate_variants [file_path] [num_variants] [intensity]"""
+            args = shlex.split(arg)
+            if len(args) < 2:
+                print("Usage: generate_variants [file_path] [num_variants] [intensity]")
+                return
+                
+            file_path = args[0]
+            num_variants = int(args[1]) if len(args) > 1 else 1
+            intensity = float(args[2]) if len(args) > 2 else 0.5
+            
+            try:
+                # Import the polymorphic engine
+                from polymorphic_engine import PolymorphicEngine
+                
+                # Create the engine
+                engine = PolymorphicEngine()
+                
+                print(f"Generating {num_variants} variants of {file_path} with intensity {intensity}...")
+                
+                # Generate variants
+                variants = engine.generate_variant(file_path, num_variants, intensity)
+                
+                if variants:
+                    print(f"Successfully generated {len(variants)} variants:")
+                    for variant in variants:
+                        print(f"  {variant}")
+                else:
+                    print("Failed to generate variants.")
+                    
+            except ImportError:
+                print("The polymorphic engine module is not available. Please ensure it's properly installed.")
+            except Exception as e:
+                print(f"Error generating variants: {e}")
+                print(traceback.format_exc())
                 
         def do_list_tools(self, arg):
             """List all available tools: list_tools"""
