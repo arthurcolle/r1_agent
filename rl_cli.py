@@ -256,10 +256,22 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
                 try:
                     api_key = os.environ.get("OPENWEATHERMAP_API_KEY")
                     if api_key:
+                        # Use a session for connection pooling and better performance
+                        session = requests.Session()
                         url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={api_key}&units=imperial"
-                        response = requests.get(url)
+                        
+                        # Set a timeout to prevent hanging
+                        response = session.get(url, timeout=5.0)
                         if response.status_code == 200:
                             return response.json()
+                        elif response.status_code == 404:
+                            # Location not found, try with less specific query
+                            # Extract first word of location (e.g., "San" from "San Francisco")
+                            main_city = location.split()[0] if ' ' in location else location
+                            url = f"http://api.openweathermap.org/data/2.5/weather?q={main_city}&appid={api_key}&units=imperial"
+                            response = session.get(url, timeout=5.0)
+                            if response.status_code == 200:
+                                return response.json()
         
                     # Fallback to Jina search
                     jina_client = JinaClient()
@@ -269,6 +281,10 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
                         "weather": [{"description": search_result.get("weather_description", "Weather data unavailable")}],
                         "jina_results": search_result
                     }
+                except requests.exceptions.Timeout:
+                    return {"error": f"Weather API timeout for location: {location}"}
+                except requests.exceptions.RequestException as e:
+                    return {"error": f"Weather API request error: {str(e)}"}
                 except Exception as e:
                     return {"error": f"Weather API error: {str(e)}"}
             tools["get_weather"] = get_weather
@@ -3212,6 +3228,10 @@ class Agent(BaseModel):
         # Initialize task manager
         self.task_manager = TaskManager(self.knowledge_base.conn)
         
+        # Initialize job scheduler for long-running tasks
+        self.job_scheduler = JobScheduler(max_concurrent_jobs=10)
+        asyncio.create_task(self.job_scheduler.start())
+        
         # Register code reading and writing tools
         register_tool(
             name="read_code_file",
@@ -3307,6 +3327,81 @@ class Agent(BaseModel):
                 }
             }
         )
+        
+        # Register job management tools
+        register_tool(
+            name="submit_background_job",
+            func=self.submit_background_job,
+            description="Submit a long-running job to be executed in the background",
+            parameters={
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable name for the job"
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": "Name of the function to execute"
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "List of positional arguments",
+                    "default": []
+                },
+                "kwargs": {
+                    "type": "object",
+                    "description": "Dictionary of keyword arguments",
+                    "default": {}
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Job priority (1-10, lower is higher priority)",
+                    "default": 5
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Optional timeout in seconds",
+                    "default": None
+                }
+            }
+        )
+        
+        register_tool(
+            name="get_job_status",
+            func=self.get_job_status,
+            description="Get the status of a background job",
+            parameters={
+                "job_id": {
+                    "type": "string",
+                    "description": "ID of the job to check"
+                }
+            }
+        )
+        
+        register_tool(
+            name="list_jobs",
+            func=self.list_jobs,
+            description="List all background jobs",
+            parameters={
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, TIMEOUT)",
+                    "default": None
+                }
+            }
+        )
+        
+        register_tool(
+            name="cancel_job",
+            func=self.cancel_job,
+            description="Cancel a background job",
+            parameters={
+                "job_id": {
+                    "type": "string",
+                    "description": "ID of the job to cancel"
+                }
+            }
+        )
 
     async def _reflection_worker(self):
         """Background worker that processes code reflections and triggers transformations"""
@@ -3388,6 +3483,196 @@ class Agent(BaseModel):
             finally:
                 self._reflection_task = None
                 logging.info("Stopped reflection worker")
+                
+    async def submit_background_job(self, name: str, function_name: str, 
+                                  args: List[Any] = None, kwargs: Dict[str, Any] = None,
+                                  priority: int = 5, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Submit a long-running job to be executed in the background
+        
+        Args:
+            name: Human-readable name for the job
+            function_name: Name of the function to execute
+            args: List of positional arguments
+            kwargs: Dictionary of keyword arguments
+            priority: Job priority (1-10, lower is higher priority)
+            timeout: Optional timeout in seconds
+            
+        Returns:
+            Dict containing job information
+        """
+        try:
+            # Find the function by name
+            if function_name in self.system_tools:
+                func = self.system_tools[function_name]
+            elif function_name in available_functions:
+                func = available_functions[function_name]
+            else:
+                return {
+                    "success": False,
+                    "error": f"Function '{function_name}' not found"
+                }
+                
+            # Submit the job
+            job_id = await self.job_scheduler.submit_job(
+                name=name,
+                func=func,
+                priority=priority,
+                args=args,
+                kwargs=kwargs,
+                timeout=timeout
+            )
+            
+            # Create a task to track the job
+            task = await self.create_task(
+                title=f"Background job: {name}",
+                description=f"Long-running job executing function '{function_name}'",
+                priority=priority,
+                tags=["background_job", function_name]
+            )
+            
+            # Link the job ID to the task
+            if task.get("success", False):
+                task_id = task.get("task_id")
+                await self.update_task(
+                    task_id=task_id,
+                    status="in_progress",
+                    result={"job_id": job_id}
+                )
+            
+            return {
+                "success": True,
+                "job_id": job_id,
+                "task_id": task.get("task_id") if task.get("success", False) else None,
+                "name": name,
+                "status": "PENDING",
+                "message": f"Job '{name}' submitted successfully"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+            
+    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get the status of a background job
+        
+        Args:
+            job_id: ID of the job to check
+            
+        Returns:
+            Dict containing job status information
+        """
+        try:
+            status = await self.job_scheduler.get_job_status(job_id)
+            
+            if status:
+                return {
+                    "success": True,
+                    "job_id": status["job_id"],
+                    "name": status["name"],
+                    "status": status["status"],
+                    "progress": status["progress"],
+                    "created_at": status["created_at"],
+                    "started_at": status["started_at"],
+                    "completed_at": status["completed_at"],
+                    "error": status["error"],
+                    "result": status["result"]
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Job with ID '{job_id}' not found"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+            
+    async def list_jobs(self, status: Optional[str] = None) -> Dict[str, Any]:
+        """
+        List all background jobs
+        
+        Args:
+            status: Optional status filter (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, TIMEOUT)
+            
+        Returns:
+            Dict containing list of jobs
+        """
+        try:
+            # Convert string status to enum if provided
+            status_enum = None
+            if status:
+                try:
+                    status_enum = JobStatus[status.upper()]
+                except KeyError:
+                    return {
+                        "success": False,
+                        "error": f"Invalid status: {status}"
+                    }
+            
+            jobs = await self.job_scheduler.list_jobs(status=status_enum)
+            
+            return {
+                "success": True,
+                "count": len(jobs),
+                "jobs": jobs
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+            
+    async def cancel_job(self, job_id: str) -> Dict[str, Any]:
+        """
+        Cancel a background job
+        
+        Args:
+            job_id: ID of the job to cancel
+            
+        Returns:
+            Dict containing cancellation result
+        """
+        try:
+            result = await self.job_scheduler.cancel_job(job_id)
+            
+            if result:
+                # Find and update any associated task
+                tasks = await self.list_tasks(tag="background_job")
+                if tasks.get("success", False):
+                    for task in tasks.get("tasks", []):
+                        task_id = task.get("task_id")
+                        task_result = await self.get_task(task_id)
+                        if task_result and task_result.get("result", {}).get("job_id") == job_id:
+                            await self.update_task(
+                                task_id=task_id,
+                                status="failed",
+                                result={"job_id": job_id, "cancelled": True}
+                            )
+                            break
+                
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "message": "Job cancelled successfully"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to cancel job '{job_id}' (not found or already completed)"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
 
     async def reflect_on_current_code(self):
         """Queue code chunks for reflection in the background"""
@@ -4066,11 +4351,74 @@ class Agent(BaseModel):
                 location = location_match.group(1).strip()
                 print(f"\n🌤️ Weather query detected for location: {location}", flush=True)
                 
+                # Create a task for weather retrieval to handle it as a long-running operation
+                weather_task_id = None
                 try:
-                    # Try to get weather data
-                    if "get_weather" in self.system_tools:
-                        weather_data = await self.system_tools["get_weather"](location)
+                    # Create a task for weather retrieval
+                    weather_task = await self.create_task(
+                        title=f"Weather lookup for {location}",
+                        description=f"Retrieve current weather data for {location}",
+                        priority=2,
+                        tags=["weather", "api"]
+                    )
+                    
+                    if weather_task.get("success", False):
+                        weather_task_id = weather_task.get("task_id")
+                        await self.update_task(weather_task_id, status="in_progress")
                         
+                        # Try to get weather data with timeout and retry
+                        weather_data = None
+                        max_retries = 3
+                        retry_count = 0
+                        
+                        while retry_count < max_retries and not weather_data:
+                            try:
+                                if "get_weather" in self.system_tools:
+                                    # Set a timeout for the weather API call
+                                    weather_future = asyncio.ensure_future(
+                                        self.system_tools["get_weather"](location)
+                                    )
+                                    
+                                    # Wait for the result with a timeout
+                                    weather_data = await asyncio.wait_for(weather_future, timeout=5.0)
+                                    
+                                    if weather_data and "error" not in weather_data:
+                                        # Update task with success
+                                        await self.update_task(
+                                            weather_task_id, 
+                                            status="completed",
+                                            result=weather_data
+                                        )
+                                        break
+                                    else:
+                                        # API returned an error
+                                        retry_count += 1
+                                        print(f"\n⚠️ Weather API error, retrying ({retry_count}/{max_retries})...", flush=True)
+                                        await asyncio.sleep(1)  # Wait before retry
+                                else:
+                                    # Weather tool not available
+                                    await self.update_task(
+                                        weather_task_id,
+                                        status="failed",
+                                        result={"error": "Weather tool not available"}
+                                    )
+                                    break
+                            except asyncio.TimeoutError:
+                                # Timeout occurred
+                                retry_count += 1
+                                print(f"\n⚠️ Weather API timeout, retrying ({retry_count}/{max_retries})...", flush=True)
+                                await asyncio.sleep(1)  # Wait before retry
+                            except Exception as e:
+                                # Other error occurred
+                                await self.update_task(
+                                    weather_task_id,
+                                    status="failed",
+                                    result={"error": str(e)}
+                                )
+                                print(f"\n❌ Error getting weather data: {str(e)}", flush=True)
+                                break
+                        
+                        # Process the weather data if available
                         if weather_data and "error" not in weather_data:
                             # Extract weather information
                             if "main" in weather_data and "weather" in weather_data:
@@ -4083,12 +4431,35 @@ class Agent(BaseModel):
                                 # Add to conversation and return
                                 await self.add_to_conversation(conv_id, "assistant", weather_response)
                                 return weather_response
-                    
-                    # If we get here, either the tool failed or we don't have it
-                    # Continue with normal processing
-                    print("\n⚠️ Weather tool unavailable or failed, falling back to standard processing", flush=True)
+                            else:
+                                # Fallback to Jina search results if available
+                                if "jina_results" in weather_data:
+                                    jina_weather = weather_data.get("jina_results", {}).get("weather_description", "unavailable")
+                                    weather_response = f"I couldn't get precise weather data for {location}, but according to search results, the weather is approximately {jina_weather}."
+                                    await self.add_to_conversation(conv_id, "assistant", weather_response)
+                                    return weather_response
+                        
+                        # If we get here, all retries failed or no data available
+                        if retry_count >= max_retries:
+                            await self.update_task(
+                                weather_task_id,
+                                status="failed",
+                                result={"error": "Maximum retries exceeded"}
+                            )
+                            print("\n❌ Weather data retrieval failed after maximum retries", flush=True)
+                
                 except Exception as e:
-                    print(f"\n❌ Error getting weather data: {str(e)}", flush=True)
+                    # Update task as failed if it was created
+                    if weather_task_id:
+                        await self.update_task(
+                            weather_task_id,
+                            status="failed",
+                            result={"error": str(e)}
+                        )
+                    print(f"\n❌ Error in weather task: {str(e)}", flush=True)
+                
+                # If we reach here, we couldn't get weather data, so continue with normal processing
+                print("\n⚠️ Weather data unavailable, falling back to standard processing", flush=True)
         
         # Process with chain-of-thought
         cot = await self.analyze_thought_process(question)
@@ -6225,6 +6596,125 @@ class AgentCLI(cmd.Cmd):
                 print(f"Unknown command: {command}")
                 print("Usage: code [read|write] <file_path> [content]")
                 
+        def do_jobs(self, arg):
+            """Manage background jobs: jobs [list|submit|status|cancel]"""
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: jobs [list|submit|status|cancel]")
+                return
+                
+            command = args[0].lower()
+            
+            if command == "list":
+                # Parse status filter
+                status = None
+                if len(args) > 1:
+                    status = args[1].upper()
+                
+                # List jobs
+                result = asyncio.run(self.agent.list_jobs(status=status))
+                
+                if result["success"]:
+                    print(f"\nFound {result['count']} jobs:")
+                    for i, job in enumerate(result["jobs"]):
+                        status_color = "\033[92m" if job["status"] == "COMPLETED" else \
+                                      "\033[93m" if job["status"] == "RUNNING" else \
+                                      "\033[91m" if job["status"] in ["FAILED", "CANCELLED", "TIMEOUT"] else "\033[94m"
+                        print(f"{i+1}. {job['name']} ({status_color}{job['status']}\033[0m)")
+                        print(f"   ID: {job['job_id']}")
+                        print(f"   Progress: {job['progress']*100:.1f}%")
+                        print(f"   Created: {job['created_at']}")
+                        print()
+                else:
+                    print(f"Error listing jobs: {result['error']}")
+            
+            elif command == "submit":
+                if len(args) < 3:
+                    print("Usage: jobs submit <name> <function_name> [priority=5] [timeout=None]")
+                    return
+                
+                name = args[1]
+                function_name = args[2]
+                priority = 5
+                timeout = None
+                
+                # Parse optional arguments
+                for i in range(3, len(args)):
+                    if args[i].startswith("priority="):
+                        try:
+                            priority = int(args[i].split("=")[1])
+                        except ValueError:
+                            print(f"Invalid priority: {args[i].split('=')[1]}")
+                            return
+                    elif args[i].startswith("timeout="):
+                        try:
+                            timeout_str = args[i].split("=")[1]
+                            timeout = float(timeout_str) if timeout_str.lower() != "none" else None
+                        except ValueError:
+                            print(f"Invalid timeout: {args[i].split('=')[1]}")
+                            return
+                
+                # Submit job
+                result = asyncio.run(self.agent.submit_background_job(
+                    name=name,
+                    function_name=function_name,
+                    priority=priority,
+                    timeout=timeout
+                ))
+                
+                if result["success"]:
+                    print(f"Submitted job: {result['name']} (ID: {result['job_id']})")
+                    if result["task_id"]:
+                        print(f"Associated task ID: {result['task_id']}")
+                else:
+                    print(f"Error submitting job: {result['error']}")
+            
+            elif command == "status":
+                if len(args) < 2:
+                    print("Usage: jobs status <job_id>")
+                    return
+                
+                job_id = args[1]
+                
+                # Get job status
+                result = asyncio.run(self.agent.get_job_status(job_id))
+                
+                if result["success"]:
+                    print(f"\nJob: {result['name']} (ID: {result['job_id']})")
+                    print(f"Status: {result['status']}")
+                    print(f"Progress: {result['progress']*100:.1f}%")
+                    print(f"Created: {result['created_at']}")
+                    if result["started_at"]:
+                        print(f"Started: {result['started_at']}")
+                    if result["completed_at"]:
+                        print(f"Completed: {result['completed_at']}")
+                    if result["error"]:
+                        print(f"Error: {result['error']}")
+                    if result["result"]:
+                        print(f"Result: {result['result']}")
+                else:
+                    print(f"Error getting job status: {result['error']}")
+            
+            elif command == "cancel":
+                if len(args) < 2:
+                    print("Usage: jobs cancel <job_id>")
+                    return
+                
+                job_id = args[1]
+                
+                # Cancel job
+                result = asyncio.run(self.agent.cancel_job(job_id))
+                
+                if result["success"]:
+                    print(f"Cancelled job: {job_id}")
+                    print(f"Message: {result['message']}")
+                else:
+                    print(f"Error cancelling job: {result['error']}")
+            
+            else:
+                print(f"Unknown command: {command}")
+                print("Usage: jobs [list|submit|status|cancel]")
+                
         def do_exit(self, arg):
             """Exit the CLI: exit"""
             if hasattr(self, "observer"):
@@ -6232,6 +6722,8 @@ class AgentCLI(cmd.Cmd):
                 self.observer.join()
             # Stop reflection worker
             asyncio.run(self.agent.stop_reflections())
+            # Stop job scheduler
+            asyncio.run(self.agent.job_scheduler.stop())
             print("\nShutting down agent and cleaning up resources...")
             print("Goodbye!")
             return True
@@ -6241,6 +6733,263 @@ class AgentCLI(cmd.Cmd):
             print()  # Add newline
             return self.do_exit(arg)
 
+
+# ------------------------------------------------------------------------------
+# Resource Management and Job Scheduling
+# ------------------------------------------------------------------------------
+
+class JobStatus(Enum):
+    """Status of a background job"""
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    CANCELLED = auto()
+    TIMEOUT = auto()
+
+class BackgroundJob:
+    """
+    Represents a long-running background job with progress tracking
+    and resource management.
+    """
+    def __init__(self, job_id: str, name: str, func: Callable, args: List[Any] = None, 
+                kwargs: Dict[str, Any] = None, timeout: Optional[float] = None):
+        self.job_id = job_id
+        self.name = name
+        self.func = func
+        self.args = args or []
+        self.kwargs = kwargs or {}
+        self.timeout = timeout
+        self.status = JobStatus.PENDING
+        self.result = None
+        self.error = None
+        self.created_at = datetime.now().isoformat()
+        self.started_at = None
+        self.completed_at = None
+        self.progress = 0.0
+        self.task = None  # Will hold the asyncio.Task
+        self.resource_locks = []  # Resources locked by this job
+        self.metadata = {}
+        self.cancellation_requested = False
+        
+    async def run(self):
+        """Run the job function with timeout handling"""
+        self.status = JobStatus.RUNNING
+        self.started_at = datetime.now().isoformat()
+        
+        try:
+            if self.timeout:
+                # Run with timeout
+                self.task = asyncio.create_task(self._run_func())
+                try:
+                    self.result = await asyncio.wait_for(self.task, timeout=self.timeout)
+                    self.status = JobStatus.COMPLETED
+                except asyncio.TimeoutError:
+                    self.status = JobStatus.TIMEOUT
+                    self.error = "Job timed out"
+            else:
+                # Run without timeout
+                self.task = asyncio.create_task(self._run_func())
+                self.result = await self.task
+                self.status = JobStatus.COMPLETED
+        except asyncio.CancelledError:
+            self.status = JobStatus.CANCELLED
+            self.error = "Job was cancelled"
+        except Exception as e:
+            self.status = JobStatus.FAILED
+            self.error = str(e)
+        finally:
+            self.completed_at = datetime.now().isoformat()
+            # Release any resource locks
+            for lock_id in self.resource_locks:
+                await self._release_lock(lock_id)
+            
+    async def _run_func(self):
+        """Execute the job function"""
+        if asyncio.iscoroutinefunction(self.func):
+            return await self.func(*self.args, **self.kwargs)
+        else:
+            # Run synchronous functions in a thread pool
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, lambda: self.func(*self.args, **self.kwargs))
+    
+    async def cancel(self):
+        """Request cancellation of the job"""
+        if self.status == JobStatus.RUNNING and self.task:
+            self.cancellation_requested = True
+            self.task.cancel()
+            return True
+        return False
+    
+    def update_progress(self, progress: float):
+        """Update job progress (0.0 to 1.0)"""
+        self.progress = max(0.0, min(1.0, progress))
+        
+    async def acquire_lock(self, resource_id: str) -> bool:
+        """Acquire a lock on a resource"""
+        # Implementation would depend on the locking mechanism
+        # For now, just track that we've locked this resource
+        self.resource_locks.append(resource_id)
+        return True
+        
+    async def _release_lock(self, resource_id: str) -> bool:
+        """Release a lock on a resource"""
+        # Implementation would depend on the locking mechanism
+        if resource_id in self.resource_locks:
+            self.resource_locks.remove(resource_id)
+            return True
+        return False
+
+class JobScheduler:
+    """
+    Manages and schedules background jobs with resource constraints
+    and priority-based execution.
+    """
+    def __init__(self, max_concurrent_jobs: int = 5):
+        self.jobs: Dict[str, BackgroundJob] = {}
+        self.max_concurrent_jobs = max_concurrent_jobs
+        self.running_jobs = 0
+        self.job_queue = asyncio.PriorityQueue()  # (priority, job_id)
+        self.resource_locks = {}  # resource_id -> job_id
+        self.scheduler_task = None
+        self.running = False
+        
+    async def start(self):
+        """Start the job scheduler"""
+        if not self.running:
+            self.running = True
+            self.scheduler_task = asyncio.create_task(self._scheduler_loop())
+            logging.info("Job scheduler started")
+            
+    async def stop(self):
+        """Stop the job scheduler"""
+        if self.running:
+            self.running = False
+            if self.scheduler_task:
+                self.scheduler_task.cancel()
+                try:
+                    await self.scheduler_task
+                except asyncio.CancelledError:
+                    pass
+            logging.info("Job scheduler stopped")
+            
+    async def submit_job(self, name: str, func: Callable, priority: int = 5,
+                       args: List[Any] = None, kwargs: Dict[str, Any] = None,
+                       timeout: Optional[float] = None) -> str:
+        """
+        Submit a job to be executed in the background
+        
+        Args:
+            name: Human-readable name for the job
+            func: Function to execute
+            priority: Job priority (lower number = higher priority)
+            args: Positional arguments for the function
+            kwargs: Keyword arguments for the function
+            timeout: Optional timeout in seconds
+            
+        Returns:
+            str: Job ID
+        """
+        job_id = str(uuid.uuid4())
+        job = BackgroundJob(job_id, name, func, args, kwargs, timeout)
+        self.jobs[job_id] = job
+        
+        # Add to queue with priority
+        await self.job_queue.put((priority, job_id))
+        
+        logging.info(f"Job submitted: {name} (ID: {job_id}, Priority: {priority})")
+        return job_id
+        
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a job by ID"""
+        if job_id in self.jobs:
+            job = self.jobs[job_id]
+            if job.status == JobStatus.PENDING:
+                # For pending jobs, just mark as cancelled
+                job.status = JobStatus.CANCELLED
+                job.error = "Cancelled before execution"
+                job.completed_at = datetime.now().isoformat()
+                return True
+            elif job.status == JobStatus.RUNNING:
+                # For running jobs, request cancellation
+                return await job.cancel()
+        return False
+        
+    async def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get the status of a job"""
+        if job_id in self.jobs:
+            job = self.jobs[job_id]
+            return {
+                "job_id": job.job_id,
+                "name": job.name,
+                "status": job.status.name,
+                "progress": job.progress,
+                "created_at": job.created_at,
+                "started_at": job.started_at,
+                "completed_at": job.completed_at,
+                "error": job.error,
+                "result": job.result
+            }
+        return None
+        
+    async def list_jobs(self, status: Optional[JobStatus] = None) -> List[Dict[str, Any]]:
+        """List all jobs, optionally filtered by status"""
+        result = []
+        for job_id, job in self.jobs.items():
+            if status is None or job.status == status:
+                result.append({
+                    "job_id": job.job_id,
+                    "name": job.name,
+                    "status": job.status.name,
+                    "progress": job.progress,
+                    "created_at": job.created_at
+                })
+        return result
+        
+    async def _scheduler_loop(self):
+        """Main scheduler loop that processes the job queue"""
+        try:
+            while self.running:
+                # Check if we can run more jobs
+                if self.running_jobs < self.max_concurrent_jobs:
+                    try:
+                        # Get the next job with the highest priority (lowest number)
+                        priority, job_id = await asyncio.wait_for(
+                            self.job_queue.get(), timeout=1.0)
+                        
+                        if job_id in self.jobs:
+                            job = self.jobs[job_id]
+                            
+                            # Skip cancelled or completed jobs
+                            if job.status not in [JobStatus.PENDING]:
+                                self.job_queue.task_done()
+                                continue
+                                
+                            # Start the job
+                            self.running_jobs += 1
+                            asyncio.create_task(self._run_job(job))
+                            
+                        self.job_queue.task_done()
+                    except asyncio.TimeoutError:
+                        # No jobs in queue, just continue
+                        pass
+                else:
+                    # Wait a bit before checking again
+                    await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            logging.info("Scheduler loop cancelled")
+            raise
+        except Exception as e:
+            logging.error(f"Error in scheduler loop: {e}")
+            
+    async def _run_job(self, job: BackgroundJob):
+        """Run a job and handle completion"""
+        try:
+            await job.run()
+        finally:
+            self.running_jobs -= 1
+            logging.info(f"Job completed: {job.name} (ID: {job.job_id}, Status: {job.status.name})")
 
 # ------------------------------------------------------------------------------
 # Main Entry Point: Choose RL, CLI, or FastAPI with enhanced command-line options
