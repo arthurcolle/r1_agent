@@ -3147,6 +3147,7 @@ class Agent(BaseModel):
     self_transformation: SelfTransformation = None
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
     task_manager: TaskManager = None
+    job_scheduler: Optional[Any] = None  # Add job_scheduler field
 
     root: Optional[Node] = None
     q_table: Dict[str, float] = Field(default_factory=dict)
