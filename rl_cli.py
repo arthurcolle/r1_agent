@@ -290,18 +290,25 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
             tools["get_weather"] = get_weather
         
         # Search implementations
-        if "serpapi" in capabilities["env_vars"]:
-            from serpapi import GoogleSearch
-            async def web_search(query: str) -> Dict[str, Any]:
-                try:
-                    search = GoogleSearch({
-                        "q": query,
-                        "api_key": os.getenv(capabilities["env_vars"]["serpapi"])
-                    })
-                    return search.get_dict()
-                except Exception as e:
-                    return {"error": f"Search error: {str(e)}"}
-            tools["web_search"] = web_search
+        if "serpapi" in capabilities["env_vars"] or "SERPAPI_API_KEY" in os.environ:
+            try:
+                from serpapi import GoogleSearch
+                async def web_search(query: str) -> Dict[str, Any]:
+                    try:
+                        api_key = os.getenv(capabilities["env_vars"].get("serpapi", "SERPAPI_API_KEY"))
+                        search = GoogleSearch({
+                            "q": query,
+                            "api_key": api_key
+                        })
+                        return search.get_dict()
+                    except Exception as e:
+                        logging.error(f"SerpAPI search error: {e}")
+                        return {"error": f"Search error: {str(e)}"}
+                tools["web_search"] = web_search
+                logging.info("SerpAPI search tool registered")
+            except ImportError:
+                logging.warning("SerpAPI package not installed. To use SerpAPI search, install with: pip install google-search-results")
+                
         elif "GOOGLE_API_KEY" in os.environ and "GOOGLE_CSE_ID" in os.environ:
             async def web_search(query: str) -> Dict[str, Any]:
                 try:
@@ -311,13 +318,31 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
                         "cx": os.environ["GOOGLE_CSE_ID"],
                         "q": query
                     }
-                    response = requests.get(url, params=params)
+                    # Set timeout to prevent hanging
+                    response = requests.get(url, params=params, timeout=10.0)
                     if response.status_code == 200:
                         return response.json()
                     return {"error": f"Google search error: {response.status_code}"}
+                except requests.exceptions.Timeout:
+                    return {"error": "Google search timeout"}
                 except Exception as e:
+                    logging.error(f"Google search error: {e}")
                     return {"error": f"Search error: {str(e)}"}
             tools["web_search"] = web_search
+            logging.info("Google Custom Search tool registered")
+            
+            # Register tool schema
+            register_tool(
+                "web_search",
+                web_search,
+                "Search the web using Google Custom Search",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    }
+                }
+            )
 
     return tools
 
@@ -3933,9 +3958,48 @@ class Agent(BaseModel):
         """Perform a web search if search capability is available"""
         if "web_search" in self.system_tools and self.system_tools["web_search"]:
             try:
+                # Create a task for tracking the search operation
+                search_task = await self.create_task(
+                    title=f"Web search for: {query}",
+                    description=f"Search the web for information about: {query}",
+                    priority=3,
+                    tags=["search", "web"]
+                )
+                
+                if search_task.get("success", False):
+                    search_task_id = search_task.get("task_id")
+                    await self.update_task(search_task_id, status="in_progress")
+                    
+                    # Perform the search
+                    search_result = await self.system_tools["web_search"](query)
+                    
+                    # Update task with results
+                    if search_result:
+                        await self.update_task(
+                            search_task_id,
+                            status="completed",
+                            result=search_result
+                        )
+                        return search_result
+                    else:
+                        await self.update_task(
+                            search_task_id,
+                            status="failed",
+                            result={"error": "No search results found"}
+                        )
+                
                 return await self.system_tools["web_search"](query)
             except Exception as e:
                 logging.error(f"Web search error: {e}")
+                
+        # Try Jina search as fallback if web_search is not available
+        if "jina_search" in self.system_tools and self.system_tools["jina_search"]:
+            try:
+                logging.info(f"Falling back to Jina search for: {query}")
+                return await self.system_tools["jina_search"](query)
+            except Exception as e:
+                logging.error(f"Jina search error: {e}")
+                
         return None
 
     async def edit_file(self, file_path: str, content: str) -> bool:
@@ -4477,20 +4541,33 @@ class Agent(BaseModel):
         cot = await self.analyze_thought_process(question)
         code_context = await self.retrieve_relevant_code(question)
         
-        # Try web search for factual queries
+        # Try web search for factual queries or explicit search requests
         search_context = "Relevant documents: (stub)"
-        if any(term in question.lower() for term in ["what", "who", "where", "when", "how"]):
-            if "web_search" in self.system_tools:
-                search_result = await self.system_tools["web_search"](question)
-                if search_result and "error" not in search_result:
-                    # Extract relevant information from search results
-                    search_context = "Search results:\n"
-                    if "items" in search_result:
-                        for item in search_result["items"][:3]:
-                            search_context += f"- {item['title']}: {item['snippet']}\n"
-                    elif "organic_results" in search_result:
-                        for item in search_result["organic_results"][:3]:
-                            search_context += f"- {item['title']}: {item['snippet']}\n"
+        if any(term in question.lower() for term in ["what", "who", "where", "when", "how", "search", "find", "look up", "confirm"]):
+            print(f"\n🔍 Web search query detected: {question}", flush=True)
+            search_result = await self.search_web(question)
+            if search_result and "error" not in search_result:
+                # Extract relevant information from search results
+                search_context = "Search results:\n"
+                if "items" in search_result:
+                    for item in search_result["items"][:3]:
+                        search_context += f"- {item['title']}: {item['snippet']}\n"
+                elif "organic_results" in search_result:
+                    for item in search_result["organic_results"][:3]:
+                        search_context += f"- {item['title']}: {item['snippet']}\n"
+                elif "answer" in search_result:
+                    search_context += f"- Answer: {search_result['answer']}\n"
+                elif "results" in search_result:
+                    for item in search_result["results"][:3]:
+                        search_context += f"- {item.get('title', 'Result')}: {item.get('content', item.get('snippet', 'No content'))}\n"
+                else:
+                    # Generic fallback for any structure
+                    search_context += f"- Results: {str(search_result)[:500]}...\n"
+                    
+                print(f"\n📊 Found search results", flush=True)
+            else:
+                search_context = "No relevant search results found."
+                print(f"\n⚠️ No search results found or search unavailable", flush=True)
         
         combined_context = f"{search_context}\n\nRelevant Code:\n{code_context}"
         
@@ -5625,6 +5702,7 @@ class AgentCLI(cmd.Cmd):
 ║   Type 'help' or '?' to list commands                           ║
 ║   Type 'dashboard' to launch the interactive dashboard           ║
 ║   Type 'chat <message>' to interact with the agent               ║
+║   Type 'search <query>' to search the web directly               ║
 ║   Type 'polymorphic' to apply code transformations               ║
 ║   Type 'exit' to quit                                            ║
 ║                                                                  ║
@@ -5994,14 +6072,14 @@ class AgentCLI(cmd.Cmd):
             if len(args) < 2:
                 print("Usage: register_tool [name] [code]")
                 return
-                
+            
             name = args[0]
             code = " ".join(args[1:])
-            
+        
             try:
                 # Execute the code in global namespace
                 exec(code, globals())
-                
+            
                 # Register the tool
                 register_tool(
                     name=name,
@@ -6012,6 +6090,48 @@ class AgentCLI(cmd.Cmd):
                 print(f"Tool '{name}' registered successfully.")
             except Exception as e:
                 print(f"Error registering tool: {e}")
+            
+        def do_search(self, arg):
+            """Search the web: search <query>"""
+            if not arg:
+                print("Usage: search <query>")
+                return
+            
+            query = arg.strip()
+            print(f"Searching for: {query}")
+        
+            try:
+                # Run the search
+                result = asyncio.run(self.agent.search_web(query))
+            
+                if result:
+                    print("\nSearch Results:")
+                
+                    # Handle different result formats
+                    if "items" in result:
+                        for i, item in enumerate(result["items"][:5]):
+                            print(f"\n{i+1}. {item.get('title', 'No title')}")
+                            print(f"   {item.get('snippet', 'No snippet')}")
+                            if 'link' in item:
+                                print(f"   URL: {item['link']}")
+                    elif "organic_results" in result:
+                        for i, item in enumerate(result["organic_results"][:5]):
+                            print(f"\n{i+1}. {item.get('title', 'No title')}")
+                            print(f"   {item.get('snippet', 'No snippet')}")
+                            if 'link' in item:
+                                print(f"   URL: {item['link']}")
+                    else:
+                        # Generic output for any structure
+                        print(json.dumps(result, indent=2))
+                else:
+                    print("No search results found or search functionality not available.")
+                    print("To enable web search, set up one of the following:")
+                    print("1. SERPAPI_API_KEY environment variable")
+                    print("2. GOOGLE_API_KEY and GOOGLE_CSE_ID environment variables")
+                    print("3. JINA_API_KEY environment variable for fallback search")
+            except Exception as e:
+                print(f"Error performing search: {e}")
+                print(traceback.format_exc())
                 
         def do_test_transformation(self, arg):
             """Test a code transformation without applying it: test_transformation [target_function]"""
