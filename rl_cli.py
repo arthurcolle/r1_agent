@@ -3231,7 +3231,7 @@ class Agent(BaseModel):
         
         # Initialize job scheduler for long-running tasks
         self.job_scheduler = JobScheduler(max_concurrent_jobs=10)
-        asyncio.create_task(self.job_scheduler.start())
+        # We'll start the job scheduler when needed, not in __init__
         
         # Register code reading and writing tools
         register_tool(
@@ -3503,6 +3503,9 @@ class Agent(BaseModel):
             Dict containing job information
         """
         try:
+            # Ensure job scheduler is running
+            await self.ensure_job_scheduler_running()
+            
             # Find the function by name
             if function_name in self.system_tools:
                 func = self.system_tools[function_name]
@@ -4205,6 +4208,11 @@ class Agent(BaseModel):
                 "error": str(e)
             }
     
+    async def ensure_job_scheduler_running(self):
+        """Ensure the job scheduler is running"""
+        if not self.job_scheduler.running:
+            await self.job_scheduler.start()
+            
     async def qa(self, conv_id: str, question: str) -> str:
         if not conv_id:
             conv_id = await self.create_conversation()
@@ -4213,6 +4221,9 @@ class Agent(BaseModel):
         # Start reflections if not already running
         if not self._reflection_running:
             await self.start_reflections()
+            
+        # Ensure job scheduler is running
+        await self.ensure_job_scheduler_running()
 
         # Check if this is a polymorphic transformation request
         if any(term in question.lower() for term in ["polymorphic", "transform code", "morph code", "code morphing"]):
@@ -6723,8 +6734,9 @@ class AgentCLI(cmd.Cmd):
                 self.observer.join()
             # Stop reflection worker
             asyncio.run(self.agent.stop_reflections())
-            # Stop job scheduler
-            asyncio.run(self.agent.job_scheduler.stop())
+            # Stop job scheduler if it's running
+            if hasattr(self.agent, 'job_scheduler') and self.agent.job_scheduler.running:
+                asyncio.run(self.agent.job_scheduler.stop())
             print("\nShutting down agent and cleaning up resources...")
             print("Goodbye!")
             return True
