@@ -2882,6 +2882,239 @@ class SelfTransformation:
             
         return changes
 
+class Task(BaseModel):
+    """
+    Represents a task that can be created, tracked, and executed by the agent.
+    """
+    task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    title: str
+    description: str
+    status: str = "pending"  # pending, in_progress, completed, failed
+    priority: int = 5  # 1-10, lower is higher priority
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    dependencies: List[str] = Field(default_factory=list)  # List of task_ids this task depends on
+    tags: List[str] = Field(default_factory=list)
+    result: Optional[Any] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    def update_status(self, status: str):
+        """Update task status and timestamp"""
+        self.status = status
+        self.updated_at = datetime.now().isoformat()
+        if status == "completed":
+            self.completed_at = datetime.now().isoformat()
+
+    def add_tag(self, tag: str):
+        """Add a tag to the task"""
+        if tag not in self.tags:
+            self.tags.append(tag)
+            self.updated_at = datetime.now().isoformat()
+
+class TaskManager:
+    """
+    Manages tasks for the agent, including creation, tracking, and execution.
+    """
+    def __init__(self, db_conn: Optional[sqlite3.Connection] = None):
+        self.tasks: Dict[str, Task] = {}
+        self.db_conn = db_conn
+        if db_conn:
+            self._create_tables()
+
+    def _create_tables(self):
+        """Create necessary tables if they don't exist"""
+        cur = self.db_conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL,
+                priority INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                completed_at TEXT,
+                dependencies TEXT,
+                tags TEXT,
+                result TEXT,
+                metadata TEXT
+            )
+        """)
+        self.db_conn.commit()
+
+    def create_task(self, title: str, description: str, priority: int = 5, 
+                   dependencies: List[str] = None, tags: List[str] = None) -> Task:
+        """Create a new task"""
+        task = Task(
+            title=title,
+            description=description,
+            priority=priority,
+            dependencies=dependencies or [],
+            tags=tags or []
+        )
+        self.tasks[task.task_id] = task
+        
+        # Save to database if available
+        if self.db_conn:
+            self._save_task_to_db(task)
+            
+        return task
+
+    def _save_task_to_db(self, task: Task):
+        """Save task to database"""
+        cur = self.db_conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO tasks 
+            (task_id, title, description, status, priority, created_at, 
+             updated_at, completed_at, dependencies, tags, result, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            task.task_id,
+            task.title,
+            task.description,
+            task.status,
+            task.priority,
+            task.created_at,
+            task.updated_at,
+            task.completed_at,
+            json.dumps(task.dependencies),
+            json.dumps(task.tags),
+            json.dumps(task.result) if task.result is not None else None,
+            json.dumps(task.metadata)
+        ))
+        self.db_conn.commit()
+
+    def get_task(self, task_id: str) -> Optional[Task]:
+        """Get a task by ID"""
+        return self.tasks.get(task_id)
+
+    def update_task(self, task_id: str, **kwargs) -> Optional[Task]:
+        """Update task properties"""
+        task = self.get_task(task_id)
+        if not task:
+            return None
+            
+        # Update fields
+        for key, value in kwargs.items():
+            if hasattr(task, key):
+                setattr(task, key, value)
+                
+        task.updated_at = datetime.now().isoformat()
+        
+        # Save to database if available
+        if self.db_conn:
+            self._save_task_to_db(task)
+            
+        return task
+
+    def update_task_status(self, task_id: str, status: str) -> Optional[Task]:
+        """Update task status"""
+        task = self.get_task(task_id)
+        if not task:
+            return None
+            
+        task.update_status(status)
+        
+        # Save to database if available
+        if self.db_conn:
+            self._save_task_to_db(task)
+            
+        return task
+
+    def update_task_result(self, task_id: str, result: Any) -> Optional[Task]:
+        """Update task result"""
+        task = self.get_task(task_id)
+        if not task:
+            return None
+            
+        task.result = result
+        task.updated_at = datetime.now().isoformat()
+        
+        # Save to database if available
+        if self.db_conn:
+            self._save_task_to_db(task)
+            
+        return task
+
+    def list_tasks(self, status: Optional[str] = None, tag: Optional[str] = None, 
+                  priority_below: Optional[int] = None) -> List[Task]:
+        """List tasks with optional filtering"""
+        tasks = list(self.tasks.values())
+        
+        # Apply filters
+        if status:
+            tasks = [t for t in tasks if t.status == status]
+        if tag:
+            tasks = [t for t in tasks if tag in t.tags]
+        if priority_below is not None:
+            tasks = [t for t in tasks if t.priority <= priority_below]
+            
+        # Sort by priority (lower first)
+        return sorted(tasks, key=lambda t: t.priority)
+
+    def get_next_task(self) -> Optional[Task]:
+        """Get the highest priority pending task with no unmet dependencies"""
+        pending_tasks = self.list_tasks(status="pending")
+        
+        # Filter out tasks with unmet dependencies
+        ready_tasks = []
+        for task in pending_tasks:
+            dependencies_met = True
+            for dep_id in task.dependencies:
+                dep_task = self.get_task(dep_id)
+                if not dep_task or dep_task.status != "completed":
+                    dependencies_met = False
+                    break
+            if dependencies_met:
+                ready_tasks.append(task)
+                
+        if not ready_tasks:
+            return None
+            
+        # Return highest priority task
+        return min(ready_tasks, key=lambda t: t.priority)
+
+    def delete_task(self, task_id: str) -> bool:
+        """Delete a task"""
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+            
+            # Delete from database if available
+            if self.db_conn:
+                cur = self.db_conn.cursor()
+                cur.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+                self.db_conn.commit()
+                
+            return True
+        return False
+
+    def load_tasks_from_db(self):
+        """Load tasks from database"""
+        if not self.db_conn:
+            return
+            
+        cur = self.db_conn.cursor()
+        cur.execute("SELECT * FROM tasks")
+        rows = cur.fetchall()
+        
+        for row in cur.fetchall():
+            task = Task(
+                task_id=row[0],
+                title=row[1],
+                description=row[2],
+                status=row[3],
+                priority=row[4],
+                created_at=row[5],
+                updated_at=row[6],
+                completed_at=row[7],
+                dependencies=json.loads(row[8]) if row[8] else [],
+                tags=json.loads(row[9]) if row[9] else [],
+                result=json.loads(row[10]) if row[10] else None,
+                metadata=json.loads(row[11]) if row[11] else {}
+            )
+            self.tasks[task.task_id] = task
+
 class Agent(BaseModel):
     """
     Advanced agent that can ingest data, reflect on its own code,
@@ -2897,6 +3130,7 @@ class Agent(BaseModel):
     system_tools: Dict[str, Callable] = Field(default_factory=dict)
     self_transformation: SelfTransformation = None
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
+    task_manager: TaskManager = None
 
     root: Optional[Node] = None
     q_table: Dict[str, float] = Field(default_factory=dict)
@@ -2974,6 +3208,105 @@ class Agent(BaseModel):
         
         # Initialize self-transformation capability
         self.self_transformation = SelfTransformation(self)
+        
+        # Initialize task manager
+        self.task_manager = TaskManager(self.knowledge_base.conn)
+        
+        # Register code reading and writing tools
+        register_tool(
+            name="read_code_file",
+            func=self.read_code_file,
+            description="Read a code file from the filesystem",
+            parameters={
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to read"
+                }
+            }
+        )
+        
+        register_tool(
+            name="write_code_file",
+            func=self.write_code_file,
+            description="Write code to a file on the filesystem",
+            parameters={
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to write"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write to the file"
+                }
+            }
+        )
+        
+        register_tool(
+            name="create_task",
+            func=self.create_task,
+            description="Create a new task for the agent to work on",
+            parameters={
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the task"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of the task"
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority level (1-10, lower is higher priority)",
+                    "default": 5
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of tags for categorizing the task",
+                    "default": []
+                }
+            }
+        )
+        
+        register_tool(
+            name="list_tasks",
+            func=self.list_tasks,
+            description="List tasks with optional filtering",
+            parameters={
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status (pending, in_progress, completed, failed)",
+                    "default": None
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Filter by tag",
+                    "default": None
+                }
+            }
+        )
+        
+        register_tool(
+            name="update_task",
+            func=self.update_task,
+            description="Update a task's status or add result",
+            parameters={
+                "task_id": {
+                    "type": "string",
+                    "description": "ID of the task to update"
+                },
+                "status": {
+                    "type": "string",
+                    "description": "New status for the task",
+                    "default": None
+                },
+                "result": {
+                    "type": "object",
+                    "description": "Result data for the task",
+                    "default": None
+                }
+            }
+        )
 
     async def _reflection_worker(self):
         """Background worker that processes code reflections and triggers transformations"""
@@ -3325,6 +3658,267 @@ class Agent(BaseModel):
             logging.error(f"File edit error: {e}")
             return False
 
+    async def read_code_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        Read a code file from the filesystem
+        
+        Args:
+            file_path: Path to the file to read
+            
+        Returns:
+            Dict containing file content and metadata
+        """
+        try:
+            # Check if file exists
+            if not os.path.exists(file_path):
+                return {
+                    "success": False,
+                    "error": f"File not found: {file_path}",
+                    "content": None
+                }
+                
+            # Read file content
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            # Get file metadata
+            stat_info = os.stat(file_path)
+            file_size = stat_info.st_size
+            modified_time = datetime.fromtimestamp(stat_info.st_mtime).isoformat()
+            
+            # Detect file type based on extension
+            _, ext = os.path.splitext(file_path)
+            file_type = ext.lstrip('.').lower() if ext else 'unknown'
+            
+            # Store in knowledge base if it's code
+            if file_type in ['py', 'js', 'java', 'c', 'cpp', 'go', 'rs', 'ts', 'rb', 'php']:
+                # Create code collection if needed
+                if not self.code_collection_id:
+                    self.code_collection_id = self.knowledge_base.create_collection(
+                        "code_files",
+                        "External code files for analysis"
+                    )
+                
+                # Compute embedding
+                emb = await compute_embedding(content, db_conn=self.knowledge_base.conn)
+                
+                # Add to knowledge base
+                await self.knowledge_base.add_knowledge_entry(
+                    kb_id=self.code_collection_id,
+                    title=f"Code: {os.path.basename(file_path)}",
+                    content=content,
+                    embedding=emb
+                )
+            
+            return {
+                "success": True,
+                "content": content,
+                "file_path": file_path,
+                "file_type": file_type,
+                "file_size": file_size,
+                "modified_time": modified_time,
+                "lines": content.count('\n') + 1
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "content": None
+            }
+    
+    async def write_code_file(self, file_path: str, content: str) -> Dict[str, Any]:
+        """
+        Write code to a file on the filesystem
+        
+        Args:
+            file_path: Path to the file to write
+            content: Content to write to the file
+            
+        Returns:
+            Dict containing success status and metadata
+        """
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+            
+            # Check if file exists
+            file_existed = os.path.exists(file_path)
+            
+            # Create backup if file exists
+            if file_existed:
+                backup_path = f"{file_path}.bak"
+                shutil.copy2(file_path, backup_path)
+            
+            # Write content to file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+                
+            # Get file metadata
+            stat_info = os.stat(file_path)
+            file_size = stat_info.st_size
+            modified_time = datetime.fromtimestamp(stat_info.st_mtime).isoformat()
+            
+            # Store in knowledge base if it's code
+            _, ext = os.path.splitext(file_path)
+            file_type = ext.lstrip('.').lower() if ext else 'unknown'
+            
+            if file_type in ['py', 'js', 'java', 'c', 'cpp', 'go', 'rs', 'ts', 'rb', 'php']:
+                # Create code collection if needed
+                if not self.code_collection_id:
+                    self.code_collection_id = self.knowledge_base.create_collection(
+                        "code_files",
+                        "External code files for analysis"
+                    )
+                
+                # Compute embedding
+                emb = await compute_embedding(content, db_conn=self.knowledge_base.conn)
+                
+                # Add to knowledge base
+                await self.knowledge_base.add_knowledge_entry(
+                    kb_id=self.code_collection_id,
+                    title=f"Code: {os.path.basename(file_path)}",
+                    content=content,
+                    embedding=emb
+                )
+            
+            return {
+                "success": True,
+                "file_path": file_path,
+                "file_existed": file_existed,
+                "file_type": file_type,
+                "file_size": file_size,
+                "modified_time": modified_time,
+                "lines": content.count('\n') + 1
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def create_task(self, title: str, description: str, priority: int = 5, tags: List[str] = None) -> Dict[str, Any]:
+        """
+        Create a new task for the agent to work on
+        
+        Args:
+            title: Short title for the task
+            description: Detailed description of the task
+            priority: Priority level (1-10, lower is higher priority)
+            tags: List of tags for categorizing the task
+            
+        Returns:
+            Dict containing task information
+        """
+        try:
+            task = self.task_manager.create_task(
+                title=title,
+                description=description,
+                priority=priority,
+                tags=tags or []
+            )
+            
+            return {
+                "success": True,
+                "task_id": task.task_id,
+                "title": task.title,
+                "status": task.status,
+                "priority": task.priority,
+                "created_at": task.created_at
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def list_tasks(self, status: Optional[str] = None, tag: Optional[str] = None) -> Dict[str, Any]:
+        """
+        List tasks with optional filtering
+        
+        Args:
+            status: Filter by status (pending, in_progress, completed, failed)
+            tag: Filter by tag
+            
+        Returns:
+            Dict containing list of tasks
+        """
+        try:
+            tasks = self.task_manager.list_tasks(status=status, tag=tag)
+            
+            task_list = []
+            for task in tasks:
+                task_list.append({
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "description": task.description[:100] + "..." if len(task.description) > 100 else task.description,
+                    "status": task.status,
+                    "priority": task.priority,
+                    "created_at": task.created_at,
+                    "tags": task.tags
+                })
+            
+            return {
+                "success": True,
+                "count": len(task_list),
+                "tasks": task_list
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "tasks": []
+            }
+    
+    async def update_task(self, task_id: str, status: Optional[str] = None, result: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        Update a task's status or add result
+        
+        Args:
+            task_id: ID of the task to update
+            status: New status for the task
+            result: Result data for the task
+            
+        Returns:
+            Dict containing updated task information
+        """
+        try:
+            task = self.task_manager.get_task(task_id)
+            if not task:
+                return {
+                    "success": False,
+                    "error": f"Task not found: {task_id}"
+                }
+            
+            # Update status if provided
+            if status:
+                self.task_manager.update_task_status(task_id, status)
+            
+            # Update result if provided
+            if result is not None:
+                self.task_manager.update_task_result(task_id, result)
+            
+            # Get updated task
+            updated_task = self.task_manager.get_task(task_id)
+            
+            return {
+                "success": True,
+                "task_id": updated_task.task_id,
+                "title": updated_task.title,
+                "status": updated_task.status,
+                "updated_at": updated_task.updated_at,
+                "completed_at": updated_task.completed_at
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
     async def qa(self, conv_id: str, question: str) -> str:
         if not conv_id:
             conv_id = await self.create_conversation()
@@ -5308,6 +5902,12 @@ class AgentCLI(cmd.Cmd):
             print(f"Current conversation: {self.current_conversation}")
             print(f"Conversation history: {len(self.agent.conversation_history)} entries")
             
+            # Check task stats
+            pending_tasks = len(self.agent.task_manager.list_tasks(status="pending"))
+            in_progress_tasks = len(self.agent.task_manager.list_tasks(status="in_progress"))
+            completed_tasks = len(self.agent.task_manager.list_tasks(status="completed"))
+            print(f"Tasks: {pending_tasks} pending, {in_progress_tasks} in progress, {completed_tasks} completed")
+            
             # Check system resources
             try:
                 import psutil
@@ -5422,6 +6022,208 @@ class AgentCLI(cmd.Cmd):
             except Exception as e:
                 print(f"Error retrieving code: {e}")
                 print(traceback.format_exc())
+                
+        def do_tasks(self, arg):
+            """Manage tasks: tasks [list|create|update|delete|next]"""
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: tasks [list|create|update|delete|next]")
+                return
+                
+            command = args[0].lower()
+            
+            if command == "list":
+                # Parse filters
+                status = None
+                tag = None
+                for i in range(1, len(args)):
+                    if args[i].startswith("status="):
+                        status = args[i].split("=")[1]
+                    elif args[i].startswith("tag="):
+                        tag = args[i].split("=")[1]
+                
+                # Get tasks
+                tasks = asyncio.run(self.agent.list_tasks(status=status, tag=tag))
+                
+                if tasks["success"]:
+                    print(f"\nFound {tasks['count']} tasks:")
+                    for i, task in enumerate(tasks["tasks"]):
+                        status_color = "\033[92m" if task["status"] == "completed" else \
+                                      "\033[93m" if task["status"] == "in_progress" else \
+                                      "\033[91m" if task["status"] == "failed" else "\033[94m"
+                        print(f"{i+1}. {task['title']} ({status_color}{task['status']}\033[0m)")
+                        print(f"   ID: {task['task_id']}")
+                        print(f"   Priority: {task['priority']}")
+                        print(f"   Tags: {', '.join(task['tags']) if task['tags'] else 'None'}")
+                        print(f"   Description: {task['description']}")
+                        print()
+                else:
+                    print(f"Error listing tasks: {tasks['error']}")
+            
+            elif command == "create":
+                if len(args) < 3:
+                    print("Usage: tasks create <title> <description> [priority=5] [tags=tag1,tag2]")
+                    return
+                
+                title = args[1]
+                description = args[2]
+                priority = 5
+                tags = []
+                
+                # Parse optional arguments
+                for i in range(3, len(args)):
+                    if args[i].startswith("priority="):
+                        try:
+                            priority = int(args[i].split("=")[1])
+                        except ValueError:
+                            print(f"Invalid priority: {args[i].split('=')[1]}")
+                            return
+                    elif args[i].startswith("tags="):
+                        tags = args[i].split("=")[1].split(",")
+                
+                # Create task
+                result = asyncio.run(self.agent.create_task(
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    tags=tags
+                ))
+                
+                if result["success"]:
+                    print(f"Created task: {result['title']} (ID: {result['task_id']})")
+                else:
+                    print(f"Error creating task: {result['error']}")
+            
+            elif command == "update":
+                if len(args) < 3:
+                    print("Usage: tasks update <task_id> <status> [result=...]")
+                    return
+                
+                task_id = args[1]
+                status = args[2]
+                result = None
+                
+                # Parse result if provided
+                for i in range(3, len(args)):
+                    if args[i].startswith("result="):
+                        result = args[i].split("=", 1)[1]
+                
+                # Update task
+                update_result = asyncio.run(self.agent.update_task(
+                    task_id=task_id,
+                    status=status,
+                    result=result
+                ))
+                
+                if update_result["success"]:
+                    print(f"Updated task: {update_result['title']} (Status: {update_result['status']})")
+                else:
+                    print(f"Error updating task: {update_result['error']}")
+            
+            elif command == "delete":
+                if len(args) < 2:
+                    print("Usage: tasks delete <task_id>")
+                    return
+                
+                task_id = args[1]
+                
+                # Delete task
+                if self.agent.task_manager.delete_task(task_id):
+                    print(f"Deleted task: {task_id}")
+                else:
+                    print(f"Error deleting task: Task not found")
+            
+            elif command == "next":
+                # Get next task
+                next_task = self.agent.task_manager.get_next_task()
+                
+                if next_task:
+                    print(f"\nNext task to work on:")
+                    print(f"Title: {next_task.title}")
+                    print(f"ID: {next_task.task_id}")
+                    print(f"Priority: {next_task.priority}")
+                    print(f"Description: {next_task.description}")
+                    print(f"Tags: {', '.join(next_task.tags) if next_task.tags else 'None'}")
+                else:
+                    print("No pending tasks available.")
+            
+            else:
+                print(f"Unknown command: {command}")
+                print("Usage: tasks [list|create|update|delete|next]")
+                
+        def do_code(self, arg):
+            """Read or write code files: code [read|write] <file_path> [content]"""
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: code [read|write] <file_path> [content]")
+                return
+                
+            command = args[0].lower()
+            
+            if command == "read":
+                if len(args) < 2:
+                    print("Usage: code read <file_path>")
+                    return
+                
+                file_path = args[1]
+                
+                # Read file
+                result = asyncio.run(self.agent.read_code_file(file_path))
+                
+                if result["success"]:
+                    print(f"\nFile: {result['file_path']}")
+                    print(f"Type: {result['file_type']}")
+                    print(f"Size: {result['file_size']} bytes")
+                    print(f"Modified: {result['modified_time']}")
+                    print(f"Lines: {result['lines']}")
+                    print("\n--- Content ---\n")
+                    
+                    # Print with line numbers
+                    for i, line in enumerate(result["content"].splitlines()):
+                        print(f"{i+1:4d}: {line}")
+                else:
+                    print(f"Error reading file: {result['error']}")
+            
+            elif command == "write":
+                if len(args) < 2:
+                    print("Usage: code write <file_path> [content or '-' for multiline]")
+                    return
+                
+                file_path = args[1]
+                
+                if len(args) > 2 and args[2] == '-':
+                    # Multiline mode
+                    print("Enter file content (end with a line containing only '###'):")
+                    content_lines = []
+                    while True:
+                        try:
+                            line = input()
+                            if line.strip() == '###':
+                                break
+                            content_lines.append(line)
+                        except EOFError:
+                            break
+                    content = '\n'.join(content_lines)
+                elif len(args) > 2:
+                    # Content provided as argument
+                    content = ' '.join(args[2:])
+                else:
+                    print("No content provided. Use '-' for multiline input.")
+                    return
+                
+                # Write file
+                result = asyncio.run(self.agent.write_code_file(file_path, content))
+                
+                if result["success"]:
+                    print(f"Successfully wrote to {result['file_path']}")
+                    print(f"Size: {result['file_size']} bytes")
+                    print(f"Lines: {result['lines']}")
+                else:
+                    print(f"Error writing file: {result['error']}")
+            
+            else:
+                print(f"Unknown command: {command}")
+                print("Usage: code [read|write] <file_path> [content]")
                 
         def do_exit(self, arg):
             """Exit the CLI: exit"""
