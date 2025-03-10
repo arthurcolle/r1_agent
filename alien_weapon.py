@@ -1955,6 +1955,7 @@ class DynamicTokenBuffer:
     - Supports token manipulation and transformation
     - Enables pattern matching with flexible context windows
     - Tracks token statistics and usage patterns
+    - Self-monitoring of output stream for real-time feedback
     """
     def __init__(self, max_size: int = 2000):
         self._buffer = []
@@ -1968,6 +1969,13 @@ class DynamicTokenBuffer:
         }
         self._context_windows = {}
         self._token_metadata = {}
+        self._output_stream = []
+        self._output_analysis = {
+            "sentiment": "neutral",
+            "complexity": "medium",
+            "coherence": "high",
+            "last_analysis_time": None
+        }
         
     def add_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -2202,6 +2210,67 @@ class DynamicTokenBuffer:
             self._token_stats["executions"] += 1
             self._token_stats["last_execution_time"] = time.time()
             
+    def add_to_output_stream(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Add a token to the output stream for self-monitoring.
+        
+        Args:
+            token: The token being output
+            metadata: Optional metadata about the token
+        """
+        with self._lock:
+            self._output_stream.append(token)
+            
+            # Periodically analyze the output stream
+            if len(self._output_stream) % 50 == 0:
+                self._analyze_output_stream()
+    
+    def _analyze_output_stream(self) -> None:
+        """Analyze the output stream to provide real-time feedback."""
+        with self._lock:
+            # Skip if output stream is too short
+            if len(self._output_stream) < 10:
+                return
+                
+            # Get the recent output
+            recent_output = "".join(self._output_stream[-100:])
+            
+            # Simple sentiment analysis
+            positive_words = ["success", "completed", "correct", "good", "effective"]
+            negative_words = ["error", "failed", "incorrect", "issue", "problem"]
+            
+            positive_count = sum(1 for word in positive_words if word in recent_output.lower())
+            negative_count = sum(1 for word in negative_words if word in recent_output.lower())
+            
+            if positive_count > negative_count:
+                self._output_analysis["sentiment"] = "positive"
+            elif negative_count > positive_count:
+                self._output_analysis["sentiment"] = "negative"
+            else:
+                self._output_analysis["sentiment"] = "neutral"
+                
+            # Analyze complexity
+            avg_word_length = sum(len(word) for word in recent_output.split()) / max(1, len(recent_output.split()))
+            if avg_word_length > 8:
+                self._output_analysis["complexity"] = "high"
+            elif avg_word_length > 5:
+                self._output_analysis["complexity"] = "medium"
+            else:
+                self._output_analysis["complexity"] = "low"
+                
+            # Update analysis timestamp
+            self._output_analysis["last_analysis_time"] = time.time()
+    
+    def get_output_analysis(self) -> Dict[str, Any]:
+        """Get the current analysis of the output stream."""
+        with self._lock:
+            return self._output_analysis.copy()
+    
+    def get_output_stream(self, last_n: int = 100) -> str:
+        """Get the last n tokens from the output stream."""
+        with self._lock:
+            return "".join(self._output_stream[-last_n:])
+    
     def __len__(self) -> int:
         """Get the current buffer length."""
         with self._lock:
@@ -2212,6 +2281,7 @@ class TokenRegistry:
     Maintains a registry of token sequences that can be used to trigger code execution.
     This allows the agent to stream tokens and execute code when specific patterns are detected.
     Enhanced with dynamic token buffer for better context management.
+    Now with self-monitoring capabilities for real-time output analysis.
     """
     def __init__(self):
         self._registry = {}
@@ -2220,6 +2290,8 @@ class TokenRegistry:
         self._pattern_contexts = {}
         self._execution_history = []
         self._max_history = 50
+        self._output_feedback_enabled = True
+        self._output_feedback_handlers = []
         
     def register_pattern(self, pattern: str, callback: Callable[[str, Dict[str, Any]], Any], 
                         context_size: int = 200) -> None:
@@ -2338,6 +2410,55 @@ class TokenRegistry:
         with self._lock:
             return list(self._execution_history)
     
+    def register_output_feedback_handler(self, handler: Callable[[str, Dict[str, Any]], None]) -> None:
+        """
+        Register a handler function that will be called when output feedback is available.
+        
+        Args:
+            handler: Function that takes (output_text, analysis_data) as arguments
+        """
+        with self._lock:
+            self._output_feedback_handlers.append(handler)
+            
+    def process_output_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Process a token that is being output to the user.
+        This allows the agent to monitor its own output.
+        
+        Args:
+            token: The token being output
+            metadata: Optional metadata about the token
+        """
+        with self._lock:
+            if not self._output_feedback_enabled:
+                return
+                
+            # Add to output stream
+            self._buffer.add_to_output_stream(token, metadata)
+            
+            # Periodically provide feedback
+            if len(self._buffer._output_stream) % 100 == 0:
+                self._provide_output_feedback()
+    
+    def _provide_output_feedback(self) -> None:
+        """Provide feedback on the current output stream."""
+        with self._lock:
+            # Get current output and analysis
+            output = self._buffer.get_output_stream()
+            analysis = self._buffer.get_output_analysis()
+            
+            # Call all registered handlers
+            for handler in self._output_feedback_handlers:
+                try:
+                    handler(output, analysis)
+                except Exception as e:
+                    logger.error(f"[TokenRegistry] Error in output feedback handler: {e}")
+    
+    def enable_output_feedback(self, enabled: bool = True) -> None:
+        """Enable or disable output feedback."""
+        with self._lock:
+            self._output_feedback_enabled = enabled
+            
     def clear_buffer(self) -> None:
         """Clear the token buffer."""
         with self._lock:
@@ -2380,6 +2501,7 @@ class FunctionAdapter:
     - Pattern matching with flexible context windows
     - Execution history tracking and analysis
     - Error handling and recovery for partial code execution
+    - Self-monitoring output stream with real-time feedback
     """
     def __init__(self):
         self.token_registry = TokenRegistry()
@@ -2387,6 +2509,7 @@ class FunctionAdapter:
         self.last_execution_time = 0
         self.execution_count = 0
         self.partial_code_fragments = {}
+        self.output_feedback_enabled = True
         
         # Register patterns for code execution with enhanced callbacks
         self.token_registry.register_pattern(
@@ -2850,6 +2973,32 @@ token_context = TokenContext(None)
         self._check_partial_fragments()
         
         return results
+        
+    def process_output_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Process a token that is being output to the user.
+        This allows the agent to monitor its own output.
+        
+        Args:
+            token: The token being output
+            metadata: Optional metadata about the token
+        """
+        if self.output_feedback_enabled:
+            self.token_registry.process_output_token(token, metadata)
+    
+    def register_output_feedback_handler(self, handler: Callable[[str, Dict[str, Any]], None]) -> None:
+        """
+        Register a handler function for output feedback.
+        
+        Args:
+            handler: Function that takes (output_text, analysis_data) as arguments
+        """
+        self.token_registry.register_output_feedback_handler(handler)
+    
+    def enable_output_feedback(self, enabled: bool = True) -> None:
+        """Enable or disable output feedback."""
+        self.output_feedback_enabled = enabled
+        self.token_registry.enable_output_feedback(enabled)
         
     def _check_partial_fragments(self) -> None:
         """Check if any partial code fragments can now be completed with new context."""
@@ -4347,6 +4496,144 @@ class TaskDecompositionResponse(StructuredResponse):
         }
     )
 
+class StreamingOutputManager:
+    """
+    Manages the streaming output visualization and interactive features.
+    Provides real-time feedback on the agent's output stream.
+    Features:
+    - Progress indicators for long operations
+    - Interactive command suggestions
+    - Real-time output analysis
+    - ANSI terminal control for enhanced visualization
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._progress_indicators = {}
+        self._suggested_commands = []
+        self._last_output_analysis = {}
+        self._interactive_mode = True
+        self._ansi_enabled = True
+        self._output_buffer = []
+        
+    def add_progress_indicator(self, name: str, total: int, description: str = "") -> None:
+        """Add a progress indicator for a long-running operation."""
+        with self._lock:
+            self._progress_indicators[name] = {
+                "current": 0,
+                "total": total,
+                "description": description,
+                "start_time": time.time()
+            }
+    
+    def update_progress(self, name: str, current: int) -> None:
+        """Update the progress of an indicator."""
+        with self._lock:
+            if name in self._progress_indicators:
+                self._progress_indicators[name]["current"] = current
+                
+    def remove_progress_indicator(self, name: str) -> None:
+        """Remove a progress indicator."""
+        with self._lock:
+            if name in self._progress_indicators:
+                del self._progress_indicators[name]
+                
+    def suggest_command(self, command: str, description: str) -> None:
+        """Suggest a command to the user."""
+        with self._lock:
+            self._suggested_commands.append({
+                "command": command,
+                "description": description,
+                "timestamp": time.time()
+            })
+            
+    def clear_suggested_commands(self) -> None:
+        """Clear all suggested commands."""
+        with self._lock:
+            self._suggested_commands = []
+            
+    def handle_output_feedback(self, output: str, analysis: Dict[str, Any]) -> None:
+        """Handle feedback from the output stream."""
+        with self._lock:
+            self._last_output_analysis = analysis
+            
+            # Store in output buffer
+            self._output_buffer.append({
+                "text": output,
+                "analysis": analysis.copy(),
+                "timestamp": time.time()
+            })
+            
+            # Trim buffer if needed
+            if len(self._output_buffer) > 10:
+                self._output_buffer = self._output_buffer[-10:]
+                
+    def get_progress_bar(self, name: str, width: int = 40) -> str:
+        """Get a formatted progress bar for the given indicator."""
+        with self._lock:
+            if name not in self._progress_indicators:
+                return ""
+                
+            indicator = self._progress_indicators[name]
+            current = indicator["current"]
+            total = indicator["total"]
+            description = indicator["description"]
+            
+            # Calculate percentage
+            percentage = min(100, int((current / max(1, total)) * 100))
+            
+            # Create progress bar
+            filled_width = int((percentage / 100) * width)
+            bar = "█" * filled_width + "░" * (width - filled_width)
+            
+            # Format with ANSI colors if enabled
+            if self._ansi_enabled:
+                return f"\033[1m{description}\033[0m: [{bar}] {percentage}% ({current}/{total})"
+            else:
+                return f"{description}: [{bar}] {percentage}% ({current}/{total})"
+                
+    def get_suggested_commands_text(self) -> str:
+        """Get formatted text for suggested commands."""
+        with self._lock:
+            if not self._suggested_commands:
+                return ""
+                
+            commands_text = "Suggested commands:\n"
+            for cmd in self._suggested_commands:
+                if self._ansi_enabled:
+                    commands_text += f"\033[1;36m{cmd['command']}\033[0m - {cmd['description']}\n"
+                else:
+                    commands_text += f"{cmd['command']} - {cmd['description']}\n"
+                    
+            return commands_text
+            
+    def get_output_analysis_text(self) -> str:
+        """Get formatted text for the current output analysis."""
+        with self._lock:
+            if not self._last_output_analysis:
+                return ""
+                
+            analysis_text = "Output analysis:\n"
+            for key, value in self._last_output_analysis.items():
+                if key == "last_analysis_time":
+                    continue
+                    
+                if self._ansi_enabled:
+                    analysis_text += f"\033[1;33m{key}\033[0m: {value}\n"
+                else:
+                    analysis_text += f"{key}: {value}\n"
+                    
+            return analysis_text
+            
+    def enable_ansi(self, enabled: bool = True) -> None:
+        """Enable or disable ANSI terminal control sequences."""
+        with self._lock:
+            self._ansi_enabled = enabled
+            
+    def enable_interactive_mode(self, enabled: bool = True) -> None:
+        """Enable or disable interactive mode."""
+        with self._lock:
+            self._interactive_mode = enabled
+
 class R1Agent:
     """
     The "ultra advanced" do-anything R1 agent that ties it all together:
@@ -4361,6 +4648,8 @@ class R1Agent:
      - Uses structured outputs with Pydantic models
      - Indefinite runtime in main(), shutting down only on user command
      - Manages token budget with economic reasoning
+     - Self-monitors output stream for real-time feedback
+     - Provides interactive streaming visualization
     """
     def __init__(self):
         # Initialize Together client
@@ -4382,6 +4671,14 @@ class R1Agent:
         self.function_adapter = FunctionAdapter()
         self.memory_store = TaskMemoryStore()
         self.conversation = ConversationMemory()
+        
+        # Initialize streaming output manager
+        self.streaming_output_manager = StreamingOutputManager()
+        
+        # Register output feedback handler
+        self.function_adapter.register_output_feedback_handler(
+            self.streaming_output_manager.handle_output_feedback
+        )
         
         # Initialize the self-reflective cognition with cognitive modeling capabilities
         self.reflection = SelfReflectiveCognition()
@@ -4493,6 +4790,17 @@ class R1Agent:
         )
         self.knowledge_base.add_fact("date formatting",
             "The agent can format dates and times in various formats using strftime() with format codes like %Y (year), %m (month), %d (day), %H (hour), %M (minute), %S (second)."
+        )
+        
+        # Add streaming awareness knowledge
+        self.knowledge_base.add_fact("streaming awareness",
+            "The agent is aware of its own streaming output and can analyze it in real-time for self-monitoring and feedback."
+        )
+        self.knowledge_base.add_fact("interactive commands",
+            "The agent supports interactive commands during streaming, such as /explain, /details, /status, and /help."
+        )
+        self.knowledge_base.add_fact("progress visualization",
+            "The agent can display progress bars and indicators for long-running operations, enhancing user experience."
         )
 
     def add_goal(self, name: str, description: str, priority: int = 5, 
@@ -4759,6 +5067,13 @@ print(f"Local: {local_date} {local_time} {local_timezone}")
         budget_report_pattern = r"<budget_report>(.*?)</budget_report>"
         section_pattern = r"<(\w+)>(.*?)</\1>"
         
+        # Add progress indicator for response generation
+        self.streaming_output_manager.add_progress_indicator(
+            "response_generation", 
+            100, 
+            "Generating response"
+        )
+        
         # Stream the response
         response_stream = self.client.chat.completions.create(
             model="deepseek-ai/DeepSeek-R1",
@@ -4782,6 +5097,16 @@ print(f"Local: {local_date} {local_time} {local_timezone}")
         # Track execution results from token processing
         execution_results = []
         token_position = 0
+        
+        # Suggest interactive commands
+        self.streaming_output_manager.suggest_command(
+            "/explain", 
+            "Get explanation of current reasoning"
+        )
+        self.streaming_output_manager.suggest_command(
+            "/details", 
+            "Show more detailed output"
+        )
         
         for chunk in response_stream:
             token = chunk.choices[0].delta.content
@@ -4874,7 +5199,6 @@ print(f"Local: {local_date} {local_time} {local_timezone}")
                 print(token, end='', flush=True)
                 
                 # Process token through enhanced registry for potential code execution
-                # This now returns execution results
                 results = self.function_adapter.process_streamed_token(token, token_metadata)
                 if results:
                     execution_results.extend(results)
@@ -4889,8 +5213,37 @@ print(f"Local: {local_date} {local_time} {local_timezone}")
                         output = result.get("result", {}).get("output", "")
                         if output:
                             print(f"\n--- Execution Output ---\n{output}\n-----------------------\n")
+                
+                # Process output token for self-monitoring
+                self.function_adapter.process_output_token(token, token_metadata)
+                
+                # Update progress indicator
+                progress = min(99, int((token_position / 1500) * 100))
+                self.streaming_output_manager.update_progress("response_generation", progress)
+                
+                # Periodically show progress bar (every 100 tokens)
+                if token_position % 100 == 0 and token_position > 0:
+                    progress_bar = self.streaming_output_manager.get_progress_bar("response_generation")
+                    if progress_bar:
+                        print(f"\n{progress_bar}\n", flush=True)
+        
+        # Complete progress indicator
+        self.streaming_output_manager.update_progress("response_generation", 100)
+        progress_bar = self.streaming_output_manager.get_progress_bar("response_generation")
+        print(f"\n{progress_bar}\n", flush=True)
+        self.streaming_output_manager.remove_progress_indicator("response_generation")
         
         print("\n\n=========================\n")
+        
+        # Show output analysis
+        output_analysis = self.streaming_output_manager.get_output_analysis_text()
+        if output_analysis:
+            print(f"\n{output_analysis}\n")
+            
+        # Show suggested commands
+        suggested_commands = self.streaming_output_manager.get_suggested_commands_text()
+        if suggested_commands:
+            print(f"\n{suggested_commands}\n")
         
         # Clear the token buffer after processing the response
         self.function_adapter.token_registry.clear_buffer()
@@ -5433,6 +5786,59 @@ print(f"Local: {local_date} {local_time} {local_timezone}")
         messages.extend(history)
         return messages
 
+    def handle_interactive_command(self, command: str) -> str:
+        """
+        Handle an interactive command during streaming.
+        
+        Args:
+            command: The command to handle
+            
+        Returns:
+            Response text for the command
+        """
+        if command == "/explain":
+            # Get the current cognitive reasoning trace
+            reasoning_summary = self.cognitive_engine.get_reasoning_summary()
+            return f"\n=== Current Reasoning Process ===\n{reasoning_summary}\n=========================\n"
+            
+        elif command == "/details":
+            # Get more detailed output
+            current_section = None
+            for step in self.cognitive_engine.get_chain_of_thought().steps[-5:]:
+                if step.behavior == CognitiveBehavior.EXPLORATION:
+                    current_section = "exploration"
+                    break
+                elif step.behavior == CognitiveBehavior.VERIFICATION:
+                    current_section = "verification"
+                    break
+            
+            if current_section == "exploration":
+                return "\n=== Detailed Exploration ===\nThe agent is currently exploring different approaches to solve your query. This involves generating multiple candidate solutions and evaluating them based on relevance and effectiveness.\n"
+            elif current_section == "verification":
+                return "\n=== Detailed Verification ===\nThe agent is currently verifying the accuracy of its reasoning. This involves checking intermediate results and ensuring logical consistency.\n"
+            else:
+                return "\n=== Detailed Information ===\nThe agent is processing your query using structured reasoning with multiple cognitive behaviors including verification, backtracking, and subgoal setting.\n"
+                
+        elif command == "/status":
+            # Get current status
+            tasks_count = len(self.memory_store.list_tasks())
+            pending_tasks = len([t for t in self.memory_store.list_tasks() if t.status == TaskStatus.PENDING])
+            goals_count = len(self.goal_manager.list_goals())
+            
+            return f"\n=== Current Status ===\nTasks: {tasks_count} total, {pending_tasks} pending\nGoals: {goals_count}\nToken Budget: {self.token_budget.remaining_budget}/{self.token_budget.initial_budget}\n"
+            
+        elif command == "/help":
+            # Show available commands
+            return """
+=== Available Commands ===
+/explain - Get explanation of current reasoning
+/details - Show more detailed output
+/status - Show current agent status
+/help - Show this help message
+"""
+        else:
+            return f"\nUnknown command: {command}. Type /help for available commands."
+    
     def shutdown(self) -> None:
         """
         Cleanly stop concurrency.
@@ -5453,6 +5859,8 @@ def main():
      - Uses structured outputs with Pydantic models for better task decomposition and reasoning
      - Exhibits volition and goal-seeking behavior through proactive problem-solving
      - Manages token budget with economic reasoning
+     - Provides interactive streaming visualization with real-time feedback
+     - Supports interactive commands during streaming
     """
     agent = R1Agent()
 
@@ -5506,7 +5914,7 @@ def main():
                 confidence=0.9
             )
             
-            user_text = input("\n[User] Enter your query (or 'exit' to quit):\n> ").strip()
+            user_text = input("\n[User] Enter your query (or 'exit' to quit, or /command for interactive commands):\n> ").strip()
             
             if user_text.lower() in ["exit", "quit"]:
                 logger.info("[main] Exiting upon user request.")
@@ -5518,6 +5926,12 @@ def main():
                     confidence=0.95
                 )
                 break
+                
+            # Handle interactive commands
+            if user_text.startswith("/"):
+                response = agent.handle_interactive_command(user_text)
+                print(response)
+                continue
                 
             # Add special commands to view cognitive reasoning trace
             if user_text.lower() == "show reasoning":
