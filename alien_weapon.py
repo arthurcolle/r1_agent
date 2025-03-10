@@ -1947,105 +1947,641 @@ class PriorityTaskQueue:
 # TOKEN REGISTRY AND FUNCTION ADAPTER
 ###############################################################################
 
+class DynamicTokenBuffer:
+    """
+    A dynamic buffer for managing streamed tokens with advanced capabilities:
+    - Maintains a sliding window of tokens
+    - Provides context-aware token analysis
+    - Supports token manipulation and transformation
+    - Enables pattern matching with flexible context windows
+    - Tracks token statistics and usage patterns
+    """
+    def __init__(self, max_size: int = 2000):
+        self._buffer = []
+        self._lock = threading.Lock()
+        self._max_size = max_size
+        self._token_stats = {
+            "total_processed": 0,
+            "pattern_matches": 0,
+            "executions": 0,
+            "last_execution_time": None
+        }
+        self._context_windows = {}
+        self._token_metadata = {}
+        
+    def add_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Add a token to the buffer with optional metadata.
+        
+        Args:
+            token: The token to add
+            metadata: Optional metadata about the token (e.g., position, confidence)
+        """
+        with self._lock:
+            self._buffer.append(token)
+            self._token_stats["total_processed"] += 1
+            
+            # Store metadata if provided
+            if metadata:
+                token_idx = len(self._buffer) - 1
+                self._token_metadata[token_idx] = metadata
+            
+            # Trim buffer if it gets too large
+            if len(self._buffer) > self._max_size:
+                # Remove oldest tokens and their metadata
+                excess = len(self._buffer) - self._max_size
+                self._buffer = self._buffer[excess:]
+                
+                # Update metadata indices
+                new_metadata = {}
+                for idx, meta in self._token_metadata.items():
+                    if idx >= excess:
+                        new_metadata[idx - excess] = meta
+                self._token_metadata = new_metadata
+    
+    def get_text(self, start: int = 0, end: Optional[int] = None) -> str:
+        """
+        Get text from the buffer within the specified range.
+        
+        Args:
+            start: Start index (inclusive)
+            end: End index (exclusive), or None for the entire buffer from start
+            
+        Returns:
+            String of concatenated tokens
+        """
+        with self._lock:
+            if end is None:
+                end = len(self._buffer)
+            return "".join(self._buffer[start:end])
+    
+    def get_context_window(self, window_name: str, default_size: int = 100) -> str:
+        """
+        Get a named context window, creating it if it doesn't exist.
+        
+        Args:
+            window_name: Name of the context window
+            default_size: Default size for new windows
+            
+        Returns:
+            Text in the context window
+        """
+        with self._lock:
+            if window_name not in self._context_windows:
+                # Create a new window at the end of the buffer
+                start_idx = max(0, len(self._buffer) - default_size)
+                self._context_windows[window_name] = {
+                    "start": start_idx,
+                    "size": default_size
+                }
+            
+            window = self._context_windows[window_name]
+            start = window["start"]
+            size = window["size"]
+            end = min(start + size, len(self._buffer))
+            
+            return self.get_text(start, end)
+    
+    def update_context_window(self, window_name: str, start: Optional[int] = None, 
+                             size: Optional[int] = None) -> None:
+        """
+        Update a context window's parameters.
+        
+        Args:
+            window_name: Name of the window to update
+            start: New start index, or None to keep current
+            size: New size, or None to keep current
+        """
+        with self._lock:
+            if window_name not in self._context_windows:
+                # Default to end of buffer if window doesn't exist
+                self._context_windows[window_name] = {
+                    "start": max(0, len(self._buffer) - (size or 100)),
+                    "size": size or 100
+                }
+                return
+                
+            window = self._context_windows[window_name]
+            if start is not None:
+                window["start"] = max(0, min(start, len(self._buffer) - 1))
+            if size is not None:
+                window["size"] = max(1, size)
+    
+    def find_pattern(self, pattern: str, context_size: int = 200) -> Optional[Dict[str, Any]]:
+        """
+        Find a pattern in the buffer and return its location with context.
+        
+        Args:
+            pattern: Pattern to search for
+            context_size: Amount of context to include before and after
+            
+        Returns:
+            Dict with match information or None if not found
+        """
+        with self._lock:
+            buffer_text = "".join(self._buffer)
+            match_idx = buffer_text.find(pattern)
+            
+            if match_idx == -1:
+                return None
+                
+            # Calculate context boundaries
+            start_idx = max(0, match_idx - context_size)
+            end_idx = min(len(buffer_text), match_idx + len(pattern) + context_size)
+            
+            # Get token indices
+            token_start = 0
+            for i, token in enumerate(self._buffer):
+                token_end = token_start + len(token)
+                if token_start <= match_idx < token_end:
+                    token_match_start = i
+                    break
+                token_start = token_end
+                
+            token_start = 0
+            for i, token in enumerate(self._buffer):
+                token_end = token_start + len(token)
+                if token_start <= (match_idx + len(pattern) - 1) < token_end:
+                    token_match_end = i
+                    break
+                token_start = token_end
+            
+            self._token_stats["pattern_matches"] += 1
+            
+            return {
+                "pattern": pattern,
+                "match_start": match_idx,
+                "match_end": match_idx + len(pattern),
+                "token_match_start": token_match_start,
+                "token_match_end": token_match_end,
+                "context_before": buffer_text[start_idx:match_idx],
+                "context_after": buffer_text[match_idx + len(pattern):end_idx],
+                "matched_text": buffer_text[match_idx:match_idx + len(pattern)]
+            }
+    
+    def replace_range(self, start: int, end: int, replacement: str) -> None:
+        """
+        Replace a range of tokens with a new string.
+        
+        Args:
+            start: Start index (inclusive)
+            end: End index (exclusive)
+            replacement: Replacement string
+        """
+        with self._lock:
+            if start < 0 or end > len(self._buffer) or start >= end:
+                return
+                
+            # Convert the replacement to a list of tokens (characters)
+            replacement_tokens = list(replacement)
+            
+            # Replace the range
+            self._buffer = self._buffer[:start] + replacement_tokens + self._buffer[end:]
+            
+            # Update metadata indices
+            new_metadata = {}
+            for idx, meta in self._token_metadata.items():
+                if idx < start:
+                    new_metadata[idx] = meta
+                elif idx >= end:
+                    # Adjust indices for tokens after the replaced range
+                    new_offset = len(replacement_tokens) - (end - start)
+                    new_metadata[idx + new_offset] = meta
+            self._token_metadata = new_metadata
+            
+            # Update context windows
+            for window_name, window in self._context_windows.items():
+                window_start = window["start"]
+                if window_start >= end:
+                    # Window starts after the replaced range, adjust start
+                    window["start"] = window_start + len(replacement_tokens) - (end - start)
+                elif window_start >= start:
+                    # Window starts within the replaced range, move to start of replacement
+                    window["start"] = start
+    
+    def clear(self) -> None:
+        """Clear the buffer and reset statistics."""
+        with self._lock:
+            self._buffer = []
+            self._token_metadata = {}
+            self._context_windows = {}
+            
+    def get_stats(self) -> Dict[str, Any]:
+        """Get token processing statistics."""
+        with self._lock:
+            return self._token_stats.copy()
+            
+    def mark_execution(self) -> None:
+        """Mark that an execution has occurred based on buffer content."""
+        with self._lock:
+            self._token_stats["executions"] += 1
+            self._token_stats["last_execution_time"] = time.time()
+            
+    def __len__(self) -> int:
+        """Get the current buffer length."""
+        with self._lock:
+            return len(self._buffer)
+
 class TokenRegistry:
     """
     Maintains a registry of token sequences that can be used to trigger code execution.
     This allows the agent to stream tokens and execute code when specific patterns are detected.
+    Enhanced with dynamic token buffer for better context management.
     """
     def __init__(self):
         self._registry = {}
         self._lock = threading.Lock()
-        self._token_buffer = []
-        self._max_buffer_size = 1000  # Maximum number of tokens to keep in buffer
+        self._buffer = DynamicTokenBuffer(max_size=2000)
+        self._pattern_contexts = {}
+        self._execution_history = []
+        self._max_history = 50
         
-    def register_pattern(self, pattern: str, callback: Callable[[str], None]) -> None:
-        """Register a pattern and associated callback function."""
+    def register_pattern(self, pattern: str, callback: Callable[[str, Dict[str, Any]], Any], 
+                        context_size: int = 200) -> None:
+        """
+        Register a pattern and associated callback function.
+        
+        Args:
+            pattern: Pattern to match in the token stream
+            callback: Function to call when pattern is matched
+            context_size: Amount of context to include with the match
+        """
         with self._lock:
             self._registry[pattern] = callback
+            self._pattern_contexts[pattern] = context_size
             
-    def process_token(self, token: str) -> None:
-        """Process a single token, checking for registered patterns."""
+    def process_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Process a single token, checking for registered patterns.
+        Returns a list of execution results if any patterns matched.
+        
+        Args:
+            token: The token to process
+            metadata: Optional metadata about the token
+            
+        Returns:
+            List of execution results from triggered callbacks
+        """
+        results = []
         with self._lock:
-            # Add token to buffer
-            self._token_buffer.append(token)
-            
-            # Trim buffer if it gets too large
-            if len(self._token_buffer) > self._max_buffer_size:
-                self._token_buffer = self._token_buffer[-self._max_buffer_size:]
+            # Add token to buffer with metadata
+            self._buffer.add_token(token, metadata)
             
             # Check for patterns
-            buffer_text = "".join(self._token_buffer)
             for pattern, callback in self._registry.items():
-                if pattern in buffer_text:
-                    # Extract the content that matched the pattern
-                    start_idx = buffer_text.find(pattern)
-                    end_idx = start_idx + len(pattern)
-                    matched_content = buffer_text[start_idx:end_idx]
-                    
-                    # Call the callback with the matched content
-                    callback(matched_content)
-                    
-                    # Remove the matched content from the buffer
-                    self._token_buffer = list(buffer_text[:start_idx] + buffer_text[end_idx:])
+                context_size = self._pattern_contexts.get(pattern, 200)
+                match_info = self._buffer.find_pattern(pattern, context_size)
+                
+                if match_info:
+                    try:
+                        # Call the callback with the matched content and context
+                        result = callback(match_info["matched_text"], match_info)
+                        
+                        # Record execution
+                        self._buffer.mark_execution()
+                        self._record_execution(pattern, match_info, result)
+                        
+                        # Add result to return list
+                        results.append({
+                            "pattern": pattern,
+                            "matched_text": match_info["matched_text"],
+                            "result": result
+                        })
+                        
+                        # Remove the matched content from the buffer
+                        self._buffer.replace_range(
+                            match_info["match_start"],
+                            match_info["match_end"],
+                            ""  # Replace with empty string
+                        )
+                    except Exception as e:
+                        logger.error(f"[TokenRegistry] Error executing callback for pattern '{pattern}': {e}")
+                        traceback_str = traceback.format_exc()
+                        logger.error(f"[TokenRegistry] Traceback: {traceback_str}")
+                        
+                        # Record failed execution
+                        self._record_execution(pattern, match_info, {"error": str(e), "traceback": traceback_str})
+        
+        return results
+    
+    def _record_execution(self, pattern: str, match_info: Dict[str, Any], result: Any) -> None:
+        """Record an execution in the history."""
+        execution_record = {
+            "timestamp": time.time(),
+            "pattern": pattern,
+            "context_before": match_info["context_before"][-50:],  # Limit context size
+            "context_after": match_info["context_after"][:50],
+            "matched_text": match_info["matched_text"],
+            "result": result
+        }
+        
+        self._execution_history.append(execution_record)
+        
+        # Trim history if needed
+        if len(self._execution_history) > self._max_history:
+            self._execution_history = self._execution_history[-self._max_history:]
+    
+    def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
+        """
+        Get text from a named context window in the buffer.
+        
+        Args:
+            window_name: Name of the context window
+            size: Size of the window if creating a new one
+            
+        Returns:
+            Text in the context window
+        """
+        return self._buffer.get_context_window(window_name, size)
+    
+    def get_execution_history(self) -> List[Dict[str, Any]]:
+        """Get the execution history."""
+        with self._lock:
+            return list(self._execution_history)
     
     def clear_buffer(self) -> None:
         """Clear the token buffer."""
         with self._lock:
-            self._token_buffer = []
+            self._buffer.clear()
+            
+    def get_buffer_stats(self) -> Dict[str, Any]:
+        """Get statistics about the token buffer."""
+        return self._buffer.get_stats()
 
 class FunctionAdapter:
     """
     The 'do_anything' capability: if the agent sees <function_call> do_anything: <code>...</code>,
     it executes that Python code directly. Highly insecure outside a sandbox.
     
-    Enhanced with token registry for streaming execution.
+    Enhanced with token registry for streaming execution and realtime token awareness.
+    Features:
+    - Realtime token processing with context awareness
+    - Dynamic code execution based on streamed tokens
+    - Pattern matching with flexible context windows
+    - Execution history tracking and analysis
+    - Error handling and recovery for partial code execution
     """
     def __init__(self):
         self.token_registry = TokenRegistry()
+        self.execution_context = {}
+        self.last_execution_time = 0
+        self.execution_count = 0
+        self.partial_code_fragments = {}
         
-        # Register patterns for code execution
-        self.token_registry.register_pattern("<function_call> do_anything:", self._handle_do_anything)
-        self.token_registry.register_pattern("```python", self._handle_python_code_block)
-    def _handle_do_anything(self, content: str) -> None:
-        """Handle a do_anything function call pattern."""
-        # Extract the code from the pattern
-        code_match = re.search(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", content, re.DOTALL)
+        # Register patterns for code execution with enhanced callbacks
+        self.token_registry.register_pattern(
+            "<function_call> do_anything:", 
+            self._handle_do_anything_with_context,
+            context_size=500
+        )
+        self.token_registry.register_pattern(
+            "```python", 
+            self._handle_python_code_block_with_context,
+            context_size=500
+        )
+        self.token_registry.register_pattern(
+            "<execute>", 
+            self._handle_execute_tag_with_context,
+            context_size=300
+        )
+        
+    def _handle_do_anything_with_context(self, content: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle a do_anything function call pattern with context awareness.
+        
+        Args:
+            content: The matched pattern content
+            context: Context information including surrounding tokens
+            
+        Returns:
+            Execution result
+        """
+        # Extract the code from the pattern and context
+        full_text = context["context_before"] + content + context["context_after"]
+        code_match = re.search(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", full_text, re.DOTALL)
+        
         if code_match:
             code = code_match.group(1)
+            # Store in execution context
+            self.execution_context["last_pattern"] = "do_anything"
+            self.execution_context["last_code"] = code
+            self.execution_context["context_before"] = context["context_before"]
+            self.execution_context["context_after"] = context["context_after"]
+            
             # Execute the code
-            self.do_anything(code)
+            result = self.do_anything(code)
+            
+            # Update execution stats
+            self.last_execution_time = time.time()
+            self.execution_count += 1
+            
+            return result
+        
+        # If we couldn't extract complete code, store as partial fragment
+        fragment_id = f"do_anything_{int(time.time())}"
+        self.partial_code_fragments[fragment_id] = {
+            "pattern": "do_anything",
+            "content": content,
+            "context": context,
+            "timestamp": time.time()
+        }
+        
+        return {
+            "status": "partial_match",
+            "message": "Incomplete function call detected, waiting for more tokens",
+            "fragment_id": fragment_id
+        }
     
-    def _handle_python_code_block(self, content: str) -> None:
-        """Handle a Python code block pattern."""
-        # Extract the code from the pattern
-        code_match = re.search(r"```python\s*(.*?)```", content, re.DOTALL)
+    def _handle_python_code_block_with_context(self, content: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle a Python code block pattern with context awareness.
+        
+        Args:
+            content: The matched pattern content
+            context: Context information including surrounding tokens
+            
+        Returns:
+            Execution result
+        """
+        # Extract the code from the pattern and context
+        full_text = context["context_before"] + content + context["context_after"]
+        code_match = re.search(r"```python\s*(.*?)```", full_text, re.DOTALL)
+        
         if code_match:
             code = code_match.group(1)
+            # Store in execution context
+            self.execution_context["last_pattern"] = "python_code_block"
+            self.execution_context["last_code"] = code
+            
             # Execute the code
-            self.do_anything(code)
+            result = self.do_anything(code)
+            
+            # Update execution stats
+            self.last_execution_time = time.time()
+            self.execution_count += 1
+            
+            return result
+        
+        # If we couldn't extract complete code, store as partial fragment
+        fragment_id = f"python_block_{int(time.time())}"
+        self.partial_code_fragments[fragment_id] = {
+            "pattern": "python_code_block",
+            "content": content,
+            "context": context,
+            "timestamp": time.time()
+        }
+        
+        return {
+            "status": "partial_match",
+            "message": "Incomplete code block detected, waiting for more tokens",
+            "fragment_id": fragment_id
+        }
+        
+    def _handle_execute_tag_with_context(self, content: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle an execute tag with context awareness.
+        
+        Args:
+            content: The matched pattern content
+            context: Context information including surrounding tokens
+            
+        Returns:
+            Execution result
+        """
+        # Extract the code from the pattern and context
+        full_text = context["context_before"] + content + context["context_after"]
+        code_match = re.search(r"<execute>(.*?)</execute>", full_text, re.DOTALL)
+        
+        if code_match:
+            code = code_match.group(1)
+            # Store in execution context
+            self.execution_context["last_pattern"] = "execute_tag"
+            self.execution_context["last_code"] = code
+            
+            # Execute the code
+            result = self.do_anything(code)
+            
+            # Update execution stats
+            self.last_execution_time = time.time()
+            self.execution_count += 1
+            
+            return result
+        
+        # If we couldn't extract complete code, store as partial fragment
+        fragment_id = f"execute_tag_{int(time.time())}"
+        self.partial_code_fragments[fragment_id] = {
+            "pattern": "execute_tag",
+            "content": content,
+            "context": context,
+            "timestamp": time.time()
+        }
+        
+        return {
+            "status": "partial_match",
+            "message": "Incomplete execute tag detected, waiting for more tokens",
+            "fragment_id": fragment_id
+        }
     
     def do_anything(self, snippet: str) -> Dict[str, Any]:
+        """
+        Execute arbitrary Python code with enhanced context awareness and error handling.
+        
+        Args:
+            snippet: Python code to execute
+            
+        Returns:
+            Dictionary with execution results
+        """
         code = snippet.strip()
         import re, io, sys
         code = re.sub(r"```python\s*", "", code)
         code = code.replace("```", "")
         code = re.sub(r"<code\s+language=['\"]python['\"]>\s*", "", code)
         code = code.replace("</code>", "")
-        logger.info(f"[do_anything] Executing code:\n{code}")
+        
+        # Store original code before execution
+        original_code = code
+        
+        # Add context-aware utilities to the execution environment
+        context_utilities = """
+# Context-aware utilities for code execution
+import sys, os, re, json, time
+from typing import Dict, List, Any, Optional
+
+class TokenContext:
+    """Token context manager for accessing the token buffer"""
+    def __init__(self, adapter):
+        self._adapter = adapter
+        
+    def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
+        """Get text from the token buffer"""
+        return self._adapter.token_registry.get_buffer_text(window_name, size)
+        
+    def get_execution_history(self) -> List[Dict[str, Any]]:
+        """Get the execution history"""
+        return self._adapter.token_registry.get_execution_history()
+        
+    def get_buffer_stats(self) -> Dict[str, Any]:
+        """Get statistics about the token buffer"""
+        return self._adapter.token_registry.get_buffer_stats()
+        
+    def get_last_execution_context(self) -> Dict[str, Any]:
+        """Get the context from the last execution"""
+        return self._adapter.execution_context.copy()
+
+# Create token context instance
+token_context = TokenContext(self)
+"""
+        
+        # Prepend context utilities to the code
+        code = context_utilities + "\n\n" + code
+        
+        logger.info(f"[do_anything] Executing code:\n{original_code}")
         old_stdout = sys.stdout
         mystdout = io.StringIO()
         sys.stdout = mystdout
+        
+        execution_start_time = time.time()
         try:
-            # Create a local namespace for execution
-            local_namespace = {}
+            # Create a local namespace for execution with access to token context
+            local_namespace = {
+                "token_context": TokenContext(self),
+                "execution_count": self.execution_count,
+                "last_execution_time": self.last_execution_time,
+                "execution_context": self.execution_context.copy()
+            }
+            
+            # Execute the code with timeout protection
             exec(code, globals(), local_namespace)
             
             # Extract the result if available
             result = local_namespace.get('result', None)
+            
+            # Update execution context with any new variables
+            for key, value in local_namespace.items():
+                if key not in ["token_context", "execution_count", "last_execution_time", "execution_context"] and \
+                   not key.startswith("__"):
+                    # Only store serializable values
+                    try:
+                        json.dumps({key: str(value)})
+                        self.execution_context[key] = value
+                    except (TypeError, OverflowError):
+                        # Skip non-serializable values
+                        pass
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"[do_anything] Error: {str(e)}\nTraceback:\n{tb}")
-            return {"status": "error", "error": str(e), "traceback": tb}
+            
+            # Try to extract partial results from the error
+            partial_results = self._extract_partial_results_from_error(e, tb)
+            
+            return {
+                "status": "error", 
+                "error": str(e), 
+                "traceback": tb,
+                "execution_time": time.time() - execution_start_time,
+                "partial_results": partial_results
+            }
         finally:
             sys.stdout = old_stdout
 
@@ -2056,33 +2592,241 @@ class FunctionAdapter:
         new_calls = re.findall(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", output, re.DOTALL)
         if new_calls:
             logger.info(f"[do_anything] Found nested function calls. Executing them recursively.")
+            nested_results = []
             for c in new_calls:
-                self.do_anything(c)
+                nested_result = self.do_anything(c)
+                nested_results.append(nested_result)
+                
+            # Include nested results in the return value
+            return {
+                "status": "success", 
+                "executed_code": original_code,  # Return original code without utilities
+                "output": output,
+                "result": result,
+                "execution_time": time.time() - execution_start_time,
+                "nested_executions": nested_results
+            }
 
         return {
             "status": "success", 
-            "executed_code": code, 
+            "executed_code": original_code,  # Return original code without utilities
             "output": output,
-            "result": result
+            "result": result,
+            "execution_time": time.time() - execution_start_time
         }
+        
+    def _extract_partial_results_from_error(self, error: Exception, traceback_str: str) -> Dict[str, Any]:
+        """
+        Attempt to extract partial results from an execution error.
+        
+        Args:
+            error: The exception that occurred
+            traceback_str: The traceback string
+            
+        Returns:
+            Dictionary with any partial results that could be extracted
+        """
+        partial_results = {
+            "extracted_variables": {},
+            "last_line_executed": None,
+            "error_line_number": None
+        }
+        
+        # Try to extract the line number where the error occurred
+        line_match = re.search(r"line (\d+)", traceback_str)
+        if line_match:
+            partial_results["error_line_number"] = int(line_match.group(1))
+            
+        # Extract any variables from the execution context that might have been set
+        # before the error occurred
+        for key, value in self.execution_context.items():
+            if key not in ["last_pattern", "last_code", "context_before", "context_after"]:
+                try:
+                    # Only include serializable values
+                    json.dumps({key: str(value)})
+                    partial_results["extracted_variables"][key] = value
+                except (TypeError, OverflowError):
+                    # Skip non-serializable values
+                    pass
+                    
+        return partial_results
 
+    def process_streamed_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Process a single streamed token, checking for patterns and executing code when appropriate.
+        
+        Args:
+            token: The token to process
+            metadata: Optional metadata about the token (e.g., position, confidence)
+            
+        Returns:
+            List of execution results if any patterns matched
+        """
+        # Process the token through the registry
+        results = self.token_registry.process_token(token, metadata)
+        
+        # Check for partial code fragments that might now be complete
+        self._check_partial_fragments()
+        
+        return results
+        
+    def _check_partial_fragments(self) -> None:
+        """Check if any partial code fragments can now be completed with new context."""
+        current_time = time.time()
+        fragments_to_remove = []
+        
+        for fragment_id, fragment in self.partial_code_fragments.items():
+            # Skip fragments that are too recent (still accumulating tokens)
+            if current_time - fragment["timestamp"] < 0.5:  # 500ms threshold
+                continue
+                
+            pattern = fragment["pattern"]
+            context = fragment["context"]
+            
+            # Get updated context from buffer
+            updated_context = {
+                "context_before": context["context_before"],
+                "context_after": self.token_registry.get_buffer_text("default", 500),
+                "matched_text": context["matched_text"]
+            }
+            
+            # Try to extract complete code with updated context
+            if pattern == "do_anything":
+                full_text = updated_context["context_before"] + updated_context["matched_text"] + updated_context["context_after"]
+                code_match = re.search(r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>", full_text, re.DOTALL)
+                
+                if code_match:
+                    code = code_match.group(1)
+                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id}")
+                    self.do_anything(code)
+                    fragments_to_remove.append(fragment_id)
+                    
+            elif pattern == "python_code_block":
+                full_text = updated_context["context_before"] + updated_context["matched_text"] + updated_context["context_after"]
+                code_match = re.search(r"```python\s*(.*?)```", full_text, re.DOTALL)
+                
+                if code_match:
+                    code = code_match.group(1)
+                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id}")
+                    self.do_anything(code)
+                    fragments_to_remove.append(fragment_id)
+                    
+            elif pattern == "execute_tag":
+                full_text = updated_context["context_before"] + updated_context["matched_text"] + updated_context["context_after"]
+                code_match = re.search(r"<execute>(.*?)</execute>", full_text, re.DOTALL)
+                
+                if code_match:
+                    code = code_match.group(1)
+                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id}")
+                    self.do_anything(code)
+                    fragments_to_remove.append(fragment_id)
+            
+            # Remove old fragments (older than 30 seconds)
+            if current_time - fragment["timestamp"] > 30:
+                fragments_to_remove.append(fragment_id)
+        
+        # Remove processed or expired fragments
+        for fragment_id in fragments_to_remove:
+            del self.partial_code_fragments[fragment_id]
+    
     def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
         """
         Process <function_call> tags in the text and execute the code within.
+        Enhanced with better pattern matching and multiple function types.
+        
+        Args:
+            text: Text to process for function calls
+            
+        Returns:
+            Results of function execution or None if no functions found
         """
-        function_call_pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
-        matches = re.findall(function_call_pattern, text, re.DOTALL)
+        # Process different types of function calls
         results = []
-        for match in matches:
+        
+        # Check for do_anything function calls
+        do_anything_pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
+        do_anything_matches = re.findall(do_anything_pattern, text, re.DOTALL)
+        for match in do_anything_matches:
             result = self.do_anything(match)
-            results.append(result)
+            results.append({
+                "type": "do_anything",
+                "result": result
+            })
+        
+        # Check for Python code blocks
+        python_block_pattern = r"```python\s*(.*?)```"
+        python_block_matches = re.findall(python_block_pattern, text, re.DOTALL)
+        for match in python_block_matches:
+            result = self.do_anything(match)
+            results.append({
+                "type": "python_block",
+                "result": result
+            })
+        
+        # Check for execute tags
+        execute_tag_pattern = r"<execute>(.*?)</execute>"
+        execute_tag_matches = re.findall(execute_tag_pattern, text, re.DOTALL)
+        for match in execute_tag_matches:
+            result = self.do_anything(match)
+            results.append({
+                "type": "execute_tag",
+                "result": result
+            })
+        
         return results if results else None
 
     def execute_python_code(self, code: str, long_running: bool = False) -> Dict[str, Any]:
         """
         Execute Python code. If long_running is True, use nohup to run it in the background as a separate process.
+        Enhanced with better error handling and context awareness.
+        
+        Args:
+            code: Python code to execute
+            long_running: Whether to run the code in the background
+            
+        Returns:
+            Dictionary with execution results
         """
         import io, sys, tempfile, os
+        
+        # Add context utilities to the code
+        context_utilities = """
+# Context-aware utilities for code execution
+import sys, os, re, json, time
+from typing import Dict, List, Any, Optional
+
+class TokenContext:
+    """Token context manager for accessing the token buffer"""
+    def __init__(self, adapter):
+        self._adapter = adapter
+        
+    def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
+        """Get text from the token buffer"""
+        return self._adapter.token_registry.get_buffer_text(window_name, size)
+        
+    def get_execution_history(self) -> List[Dict[str, Any]]:
+        """Get the execution history"""
+        return self._adapter.token_registry.get_execution_history()
+        
+    def get_buffer_stats(self) -> Dict[str, Any]:
+        """Get statistics about the token buffer"""
+        return self._adapter.token_registry.get_buffer_stats()
+        
+    def get_last_execution_context(self) -> Dict[str, Any]:
+        """Get the context from the last execution"""
+        return self._adapter.execution_context.copy()
+
+# Create token context instance
+token_context = TokenContext(self)
+"""
+        
+        # Store original code
+        original_code = code
+        
+        # Only add utilities for non-long-running code
+        if not long_running:
+            code = context_utilities + "\n\n" + code
+        
         try:
             if long_running:
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
@@ -2090,25 +2834,68 @@ class FunctionAdapter:
                     temp_file_path = temp_file.name
                 command = f"nohup python {temp_file_path} > /dev/null 2>&1 &"
                 os.system(command)
-                return {"status": "success", "output": "Code is running in the background"}
+                
+                # Record execution in context
+                self.execution_context["last_pattern"] = "long_running_python"
+                self.execution_context["last_code"] = original_code
+                self.execution_context["temp_file_path"] = temp_file_path
+                
+                return {
+                    "status": "success", 
+                    "output": "Code is running in the background",
+                    "temp_file_path": temp_file_path
+                }
             else:
                 old_stdout = sys.stdout
                 mystdout = io.StringIO()
                 sys.stdout = mystdout
-                exec(code, globals(), locals())
+                
+                # Create a local namespace with access to token context
+                local_namespace = {
+                    "token_context": TokenContext(self),
+                    "execution_count": self.execution_count,
+                    "last_execution_time": self.last_execution_time,
+                    "execution_context": self.execution_context.copy()
+                }
+                
+                # Execute the code
+                exec(code, globals(), local_namespace)
+                
+                # Update execution context with any new variables
+                for key, value in local_namespace.items():
+                    if key not in ["token_context", "execution_count", "last_execution_time", "execution_context"] and \
+                       not key.startswith("__"):
+                        # Only store serializable values
+                        try:
+                            json.dumps({key: str(value)})
+                            self.execution_context[key] = value
+                        except (TypeError, OverflowError):
+                            # Skip non-serializable values
+                            pass
+                
                 sys.stdout = old_stdout
-                return {"status": "success", "output": mystdout.getvalue()}
+                output = mystdout.getvalue()
+                
+                # Record execution in context
+                self.execution_context["last_pattern"] = "python_code"
+                self.execution_context["last_code"] = original_code
+                self.execution_context["last_output"] = output
+                
+                return {"status": "success", "output": output}
         except Exception as e:
-            return {"status": "error", "output": "", "error": str(e)}
-
-    def process_function_calls(self, text: str) -> Optional[Dict[str, Any]]:
-        pattern = r"<function_call>\s*do_anything\s*:\s*(.*?)</function_call>"
-        match = re.search(pattern, text, re.DOTALL)
-        if not match:
-            return None
-        snippet = match.group(1)
-        logger.info(f"[FunctionAdapter] Detected do_anything snippet:\n{snippet}")
-        return self.do_anything(snippet)
+            tb = traceback.format_exc()
+            logger.error(f"[FunctionAdapter] Error executing Python code: {e}\n{tb}")
+            
+            # Record error in context
+            self.execution_context["last_error"] = str(e)
+            self.execution_context["last_traceback"] = tb
+            
+            return {
+                "status": "error", 
+                "output": "", 
+                "error": str(e),
+                "traceback": tb
+            }
 
 ###############################################################################
 # SMART TASK PROCESSOR
@@ -3371,6 +4158,7 @@ class R1Agent:
         Uses structured output format and chain-of-thought reasoning.
         Enhanced with cognitive modeling for structured outputs and proactive problem-solving.
         Now with streaming output for all LLM generation and token budget management.
+        Further enhanced with realtime token awareness and dynamic buffer management.
         """
         # Import re module to ensure it's available in this method
         import re
@@ -3428,11 +4216,24 @@ class R1Agent:
         remaining_budget = total_budget
         budget_requested = False
         
+        # Track execution results from token processing
+        execution_results = []
+        token_position = 0
+        
         for chunk in response_stream:
             token = chunk.choices[0].delta.content
             if token:
                 streamed_response.append(token)
                 full_text = "".join(streamed_response)
+                
+                # Create token metadata
+                token_metadata = {
+                    "position": token_position,
+                    "section": current_section,
+                    "timestamp": time.time(),
+                    "budget_phase": "allocation" if not budget_requested else "execution"
+                }
+                token_position += 1
                 
                 # Check for budget request
                 if "<budget_request>" in full_text and "</budget_request>" in full_text and not budget_requested:
@@ -3459,6 +4260,16 @@ class R1Agent:
                             current_section = section
                             print(f"\n[Budget] Starting {section} section")
                             budget_usage[current_section] = 0
+                            
+                            # Update token metadata with section
+                            token_metadata["section"] = section
+                            
+                            # Create a context window for this section
+                            self.function_adapter.token_registry._buffer.update_context_window(
+                                section, 
+                                start=len(streamed_response) - 1,
+                                size=budget_allocation.get(section, 1000)
+                            )
                             break
                 
                 # Check for section end
@@ -3470,6 +4281,11 @@ class R1Agent:
                     
                     # Update remaining budget
                     remaining_budget -= used
+                    
+                    # Add section completion to token metadata
+                    token_metadata["section_complete"] = True
+                    token_metadata["section_efficiency"] = efficiency
+                    
                     current_section = None
                 
                 # Count tokens in current section
@@ -3477,17 +4293,39 @@ class R1Agent:
                     # Estimate token count for this chunk
                     token_count = 1  # Simple approximation
                     budget_usage[current_section] = budget_usage.get(current_section, 0) + token_count
+                    
+                    # Update token metadata with budget info
+                    token_metadata["budget_used"] = budget_usage[current_section]
+                    token_metadata["budget_allocated"] = budget_allocation.get(current_section, 0)
                 
                 # Check for budget report
                 if "<budget_report>" in token:
                     print(f"\n[Budget] Generating final budget report")
                     print(f"[Budget] Remaining budget: {remaining_budget} tokens")
+                    
+                    # Update token metadata
+                    token_metadata["budget_phase"] = "report"
+                    token_metadata["remaining_budget"] = remaining_budget
                 
                 # Print the token
                 print(token, end='', flush=True)
                 
-                # Process token through registry for potential code execution
-                self.function_adapter.token_registry.process_token(token)
+                # Process token through enhanced registry for potential code execution
+                # This now returns execution results
+                results = self.function_adapter.process_streamed_token(token, token_metadata)
+                if results:
+                    execution_results.extend(results)
+                    
+                    # Log execution results
+                    for result in results:
+                        pattern = result.get("pattern", "unknown")
+                        status = result.get("result", {}).get("status", "unknown")
+                        print(f"\n[Execution] Pattern '{pattern}' triggered with status '{status}'")
+                        
+                        # If there's output from the execution, print it
+                        output = result.get("result", {}).get("output", "")
+                        if output:
+                            print(f"\n--- Execution Output ---\n{output}\n-----------------------\n")
         
         print("\n\n=========================\n")
         
@@ -4296,3 +5134,145 @@ def main():
 
 if __name__ == "__main__":
     main()
+    def execute_shell_command(self, command: str, long_running: bool = False) -> Dict[str, Any]:
+        """
+        Execute a shell command with enhanced context awareness.
+        
+        Args:
+            command: Shell command to execute
+            long_running: Whether to run the command in the background
+            
+        Returns:
+            Dictionary with execution results
+        """
+        import subprocess, tempfile, os
+        
+        logger.info(f"[FunctionAdapter] Executing shell command: {command}")
+        
+        try:
+            if long_running:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as temp_file:
+                    temp_file.write(f"#!/bin/bash\n{command}")
+                    temp_file_path = temp_file.name
+                
+                # Make the script executable
+                os.chmod(temp_file_path, 0o755)
+                
+                # Run in background
+                subprocess.Popen(
+                    f"nohup {temp_file_path} > /dev/null 2>&1 &",
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Record execution in context
+                self.execution_context["last_pattern"] = "long_running_shell"
+                self.execution_context["last_command"] = command
+                self.execution_context["temp_file_path"] = temp_file_path
+                
+                return {
+                    "status": "success",
+                    "output": "Command is running in the background",
+                    "temp_file_path": temp_file_path
+                }
+            else:
+                # Run command with timeout
+                process = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30  # 30 second timeout
+                )
+                
+                # Record execution in context
+                self.execution_context["last_pattern"] = "shell_command"
+                self.execution_context["last_command"] = command
+                self.execution_context["last_return_code"] = process.returncode
+                
+                if process.returncode == 0:
+                    self.execution_context["last_output"] = process.stdout
+                    
+                    return {
+                        "status": "success",
+                        "output": process.stdout,
+                        "stderr": process.stderr,
+                        "return_code": process.returncode
+                    }
+                else:
+                    self.execution_context["last_error"] = process.stderr
+                    
+                    return {
+                        "status": "error",
+                        "output": process.stdout,
+                        "stderr": process.stderr,
+                        "return_code": process.returncode
+                    }
+        except subprocess.TimeoutExpired:
+            logger.error(f"[FunctionAdapter] Command timed out: {command}")
+            
+            # Record timeout in context
+            self.execution_context["last_pattern"] = "shell_command"
+            self.execution_context["last_command"] = command
+            self.execution_context["last_error"] = "Command timed out"
+            
+            return {
+                "status": "error",
+                "output": "",
+                "stderr": "Command timed out after 30 seconds",
+                "return_code": -1
+            }
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(f"[FunctionAdapter] Error executing shell command: {e}\n{tb}")
+            
+            # Record error in context
+            self.execution_context["last_pattern"] = "shell_command"
+            self.execution_context["last_command"] = command
+            self.execution_context["last_error"] = str(e)
+            self.execution_context["last_traceback"] = tb
+            
+            return {
+                "status": "error",
+                "output": "",
+                "stderr": str(e),
+                "return_code": -1,
+                "traceback": tb
+            }
+    def get_token_buffer_status(self) -> Dict[str, Any]:
+        """
+        Get the current status of the token buffer.
+        
+        Returns:
+            Dictionary with buffer statistics and context windows
+        """
+        buffer_stats = self.function_adapter.token_registry._buffer.get_stats()
+        
+        # Get context windows
+        context_windows = {}
+        with self.function_adapter.token_registry._buffer._lock:
+            for window_name, window in self.function_adapter.token_registry._buffer._context_windows.items():
+                context_windows[window_name] = {
+                    "start": window["start"],
+                    "size": window["size"],
+                    "text": self.function_adapter.token_registry._buffer.get_context_window(window_name)[:50] + "..."
+                }
+        
+        # Get execution history summary
+        execution_history = self.function_adapter.token_registry.get_execution_history()
+        execution_summary = []
+        for execution in execution_history[-5:]:  # Last 5 executions
+            execution_summary.append({
+                "timestamp": execution["timestamp"],
+                "pattern": execution["pattern"],
+                "matched_text": execution["matched_text"][:30] + "..." if len(execution["matched_text"]) > 30 else execution["matched_text"]
+            })
+        
+        return {
+            "buffer_stats": buffer_stats,
+            "context_windows": context_windows,
+            "buffer_length": len(self.function_adapter.token_registry._buffer),
+            "execution_history": execution_summary,
+            "partial_fragments": len(self.function_adapter.partial_code_fragments)
+        }
