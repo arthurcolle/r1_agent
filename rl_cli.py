@@ -546,17 +546,29 @@ async def compute_embeddings_batch(
     texts: List[str],
     model: str = "text-embedding-3-large",
     batch_size: int = 16,
-    db_conn: Optional[sqlite3.Connection] = None
+    db_conn: Optional[sqlite3.Connection] = None,
+    max_tokens: int = 8000  # Set a safe limit below the 8192 token limit
 ) -> List[List[float]]:
     results = []
     uncached_texts = []
     uncached_indices = []
     content_hashes = []
 
+    # Helper function to truncate or chunk text to fit token limit
+    def prepare_text(text: str) -> str:
+        # Simple approximation: ~4 chars per token for English text
+        approx_tokens = len(text) / 4
+        if approx_tokens > max_tokens:
+            # Truncate to approximately max_tokens
+            return text[:max_tokens * 4]
+        return text
+
     if db_conn:
         cur = db_conn.cursor()
         for i, text in enumerate(texts):
-            c_hash = hashlib.sha256(text.encode()).hexdigest()
+            # Prepare text to fit within token limits
+            prepared_text = prepare_text(text)
+            c_hash = hashlib.sha256(prepared_text.encode()).hexdigest()
             content_hashes.append(c_hash)
             cur.execute("SELECT embedding FROM embeddings_cache WHERE content_hash = ?", (c_hash,))
             row = cur.fetchone()
@@ -564,12 +576,12 @@ async def compute_embeddings_batch(
                 emb_list = np.frombuffer(row[0], dtype=np.float32).tolist()
                 results.append(emb_list)
             else:
-                uncached_texts.append(text)
+                uncached_texts.append(prepared_text)
                 uncached_indices.append(i)
     else:
-        uncached_texts = texts
+        uncached_texts = [prepare_text(t) for t in texts]
         uncached_indices = list(range(len(texts)))
-        content_hashes = [hashlib.sha256(t.encode()).hexdigest() for t in texts]
+        content_hashes = [hashlib.sha256(t.encode()).hexdigest() for t in uncached_texts]
 
     for i in range(0, len(uncached_texts), batch_size):
         batch = uncached_texts[i:i+batch_size]
@@ -591,7 +603,16 @@ async def compute_embeddings_batch(
             results.extend(embeddings)
         except Exception as ex:
             logging.error(f"Error in compute_embeddings_batch: {ex}")
-            results.extend([None]*len(batch))
+            # Try to recover by processing one at a time with further truncation
+            for text in batch:
+                try:
+                    # Further truncate if needed
+                    shorter_text = text[:len(text)//2] if len(text) > 1000 else text
+                    single_response = await client.embeddings.create(input=[shorter_text], model=model)
+                    results.append(single_response.data[0].embedding)
+                except Exception as inner_ex:
+                    logging.error(f"Failed to process even truncated text: {inner_ex}")
+                    results.append(None)
 
     if db_conn and len(uncached_indices) != len(texts):
         final_results = [None]*len(texts)
@@ -611,6 +632,13 @@ async def compute_embedding(
     model: str = "text-embedding-3-large",
     db_conn: Optional[sqlite3.Connection] = None
 ) -> List[float]:
+    # Check if text is too long and truncate if necessary
+    max_tokens = 8000  # Safe limit below the 8192 token limit
+    # Simple approximation: ~4 chars per token for English text
+    if len(text) / 4 > max_tokens:
+        logging.warning(f"Text too long for embedding, truncating from {len(text)} chars")
+        text = text[:max_tokens * 4]  # Truncate to fit within token limits
+        
     result_list = await compute_embeddings_batch([text], model=model, db_conn=db_conn)
     return result_list[0] if result_list else None
 
