@@ -3714,7 +3714,11 @@ result
                 }
             
             # Update the task result with the structured output
-            self.memory_store.update_task_result(task.task_id, structured_result.model_dump())
+            # Check if structured_result is a Pydantic model or a dict
+            if hasattr(structured_result, 'model_dump'):
+                self.memory_store.update_task_result(task.task_id, structured_result.model_dump())
+            else:
+                self.memory_store.update_task_result(task.task_id, structured_result)
             
             # Add verification step
             self.cognitive_engine.verify(
