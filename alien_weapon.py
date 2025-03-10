@@ -2085,11 +2085,25 @@ class DynamicTokenBuffer:
             if match_idx == -1:
                 return None
                 
-            # Calculate context boundaries
+            # Calculate context boundaries with larger context for code blocks
             start_idx = max(0, match_idx - context_size)
             end_idx = min(len(buffer_text), match_idx + len(pattern) + context_size)
             
+            # For Python code blocks, try to find the closing ```
+            if pattern == "```python":
+                # Look for closing ``` in the context after
+                context_after = buffer_text[match_idx + len(pattern):end_idx]
+                closing_idx = context_after.find("```")
+                
+                # If found, adjust the end_idx to include it
+                if closing_idx != -1:
+                    new_end_idx = match_idx + len(pattern) + closing_idx + 3  # +3 for the ```
+                    end_idx = min(len(buffer_text), new_end_idx + 50)  # Add a bit more context after
+            
             # Get token indices
+            token_match_start = 0
+            token_match_end = 0
+            
             token_start = 0
             for i, token in enumerate(self._buffer):
                 token_end = token_start + len(token)
@@ -2108,15 +2122,26 @@ class DynamicTokenBuffer:
             
             self._token_stats["pattern_matches"] += 1
             
+            # Get the context before and after
+            context_before = buffer_text[start_idx:match_idx]
+            context_after = buffer_text[match_idx + len(pattern):end_idx]
+            matched_text = buffer_text[match_idx:match_idx + len(pattern)]
+            
+            # For debugging
+            logger.debug(f"[DynamicTokenBuffer] Found pattern '{pattern}' at position {match_idx}")
+            logger.debug(f"[DynamicTokenBuffer] Context before: '{context_before[-20:]}' (length: {len(context_before)})")
+            logger.debug(f"[DynamicTokenBuffer] Context after: '{context_after[:20]}' (length: {len(context_after)})")
+            
             return {
                 "pattern": pattern,
                 "match_start": match_idx,
                 "match_end": match_idx + len(pattern),
                 "token_match_start": token_match_start,
                 "token_match_end": token_match_end,
-                "context_before": buffer_text[start_idx:match_idx],
-                "context_after": buffer_text[match_idx + len(pattern):end_idx],
-                "matched_text": buffer_text[match_idx:match_idx + len(pattern)]
+                "context_before": context_before,
+                "context_after": context_after,
+                "matched_text": matched_text,
+                "buffer_size": len(buffer_text)
             }
     
     def replace_range(self, start: int, end: int, replacement: str) -> None:
@@ -2209,6 +2234,7 @@ class TokenRegistry:
         with self._lock:
             self._registry[pattern] = callback
             self._pattern_contexts[pattern] = context_size
+            logger.info(f"[TokenRegistry] Registered pattern '{pattern}' with context size {context_size}")
             
     def process_token(self, token: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -2230,10 +2256,18 @@ class TokenRegistry:
             # Check for patterns
             for pattern, callback in self._registry.items():
                 context_size = self._pattern_contexts.get(pattern, 200)
+                
+                # For Python code blocks, use a larger context window
+                if pattern == "```python":
+                    context_size = 1000  # Use a larger context for Python code blocks
+                
                 match_info = self._buffer.find_pattern(pattern, context_size)
                 
                 if match_info:
                     try:
+                        # Log the match before processing
+                        logger.info(f"[TokenRegistry] Found pattern '{pattern}' match: '{match_info['matched_text'][:20]}...'")
+                        
                         # Call the callback with the matched content and context
                         result = callback(match_info["matched_text"], match_info)
                         
@@ -2248,12 +2282,17 @@ class TokenRegistry:
                             "result": result
                         })
                         
-                        # Remove the matched content from the buffer
-                        self._buffer.replace_range(
-                            match_info["match_start"],
-                            match_info["match_end"],
-                            ""  # Replace with empty string
-                        )
+                        # Only remove the matched content if it was successfully processed
+                        # For partial matches, we might want to keep the content in the buffer
+                        if isinstance(result, dict) and result.get("status") != "partial_match":
+                            self._buffer.replace_range(
+                                match_info["match_start"],
+                                match_info["match_end"],
+                                ""  # Replace with empty string
+                            )
+                            logger.info(f"[TokenRegistry] Removed matched content for pattern '{pattern}'")
+                        else:
+                            logger.info(f"[TokenRegistry] Kept matched content in buffer for pattern '{pattern}' (partial match)")
                     except Exception as e:
                         logger.error(f"[TokenRegistry] Error executing callback for pattern '{pattern}': {e}")
                         traceback_str = traceback.format_exc()
@@ -2426,6 +2465,8 @@ class FunctionAdapter:
         """
         # Extract the code from the pattern and context
         full_text = context["context_before"] + content + context["context_after"]
+        
+        # Use a more robust pattern that can handle multi-line code blocks
         code_match = re.search(r"```python\s*(.*?)```", full_text, re.DOTALL)
         
         if code_match:
@@ -2433,6 +2474,9 @@ class FunctionAdapter:
             # Store in execution context
             self.execution_context["last_pattern"] = "python_code_block"
             self.execution_context["last_code"] = code
+            
+            # Log the matched code
+            logger.info(f"[FunctionAdapter] Matched complete Python code block: {code[:100]}...")
             
             # Execute the code
             result = self.do_anything(code)
@@ -2443,19 +2487,32 @@ class FunctionAdapter:
             
             return result
         
-        # If we couldn't extract complete code, store as partial fragment
-        fragment_id = f"python_block_{int(time.time())}"
-        self.partial_code_fragments[fragment_id] = {
-            "pattern": "python_code_block",
-            "content": content,
-            "context": context,
-            "timestamp": time.time()
-        }
+        # Check if we have enough context to determine if this is likely a complete block
+        # Sometimes the closing ``` might not be in the context yet
+        if "```python" in full_text and not full_text.strip().endswith("```"):
+            # If we couldn't extract complete code, store as partial fragment with more context
+            fragment_id = f"python_block_{int(time.time())}"
+            self.partial_code_fragments[fragment_id] = {
+                "pattern": "python_code_block",
+                "content": content,
+                "context": context,
+                "timestamp": time.time(),
+                "full_text": full_text  # Store the full text for better context
+            }
+            
+            logger.info(f"[FunctionAdapter] Stored partial Python code block as fragment {fragment_id}")
+            
+            return {
+                "status": "partial_match",
+                "message": "Incomplete code block detected, waiting for more tokens",
+                "fragment_id": fragment_id
+            }
         
+        # If we can't determine if it's a Python code block, return a more informative message
         return {
-            "status": "partial_match",
-            "message": "Incomplete code block detected, waiting for more tokens",
-            "fragment_id": fragment_id
+            "status": "uncertain_match",
+            "message": "Uncertain if this is a complete Python code block",
+            "context_length": len(full_text)
         }
         
     def _handle_execute_tag_with_context(self, content: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -2704,10 +2761,10 @@ token_context = TokenContext(self)
             pattern = fragment["pattern"]
             context = fragment["context"]
             
-            # Get updated context from buffer
+            # Get updated context from buffer with a larger window for better matching
             updated_context = {
                 "context_before": context["context_before"],
-                "context_after": self.token_registry.get_buffer_text("default", 500),
+                "context_after": self.token_registry.get_buffer_text("default", 1000),  # Increased context size
                 "matched_text": context["matched_text"]
             }
             
@@ -2718,19 +2775,38 @@ token_context = TokenContext(self)
                 
                 if code_match:
                     code = code_match.group(1)
-                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id}")
+                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id} (do_anything)")
                     self.do_anything(code)
                     fragments_to_remove.append(fragment_id)
                     
             elif pattern == "python_code_block":
                 full_text = updated_context["context_before"] + updated_context["matched_text"] + updated_context["context_after"]
+                
+                # Use a more robust pattern for Python code blocks
                 code_match = re.search(r"```python\s*(.*?)```", full_text, re.DOTALL)
                 
                 if code_match:
                     code = code_match.group(1)
-                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id}")
-                    self.do_anything(code)
+                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id} (python_code_block)")
+                    logger.info(f"[FunctionAdapter] Executing code: {code[:100]}...")
+                    result = self.do_anything(code)
+                    
+                    # Log execution result
+                    if isinstance(result, dict) and "status" in result:
+                        logger.info(f"[FunctionAdapter] Execution result: {result['status']}")
+                    
                     fragments_to_remove.append(fragment_id)
+                else:
+                    # Check if we have a partial code block that's still incomplete
+                    # but has accumulated enough content to be worth executing
+                    if "```python" in full_text and current_time - fragment["timestamp"] > 5:  # 5 seconds threshold
+                        # Try to extract code between ```python and the end of the buffer
+                        partial_match = re.search(r"```python\s*(.*?)$", full_text, re.DOTALL)
+                        if partial_match and len(partial_match.group(1)) > 50:  # Only if we have substantial code
+                            partial_code = partial_match.group(1)
+                            logger.info(f"[FunctionAdapter] Executing incomplete code block after timeout: {partial_code[:100]}...")
+                            self.do_anything(partial_code)
+                            fragments_to_remove.append(fragment_id)
                     
             elif pattern == "execute_tag":
                 full_text = updated_context["context_before"] + updated_context["matched_text"] + updated_context["context_after"]
@@ -2738,12 +2814,13 @@ token_context = TokenContext(self)
                 
                 if code_match:
                     code = code_match.group(1)
-                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id}")
+                    logger.info(f"[FunctionAdapter] Completed partial fragment {fragment_id} (execute_tag)")
                     self.do_anything(code)
                     fragments_to_remove.append(fragment_id)
             
             # Remove old fragments (older than 30 seconds)
             if current_time - fragment["timestamp"] > 30:
+                logger.info(f"[FunctionAdapter] Removing expired fragment {fragment_id} (pattern: {pattern})")
                 fragments_to_remove.append(fragment_id)
         
         # Remove processed or expired fragments
