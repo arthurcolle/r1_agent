@@ -2509,24 +2509,24 @@ import sys, os, re, json, time
 from typing import Dict, List, Any, Optional
 
 class TokenContext:
-    """Token context manager for accessing the token buffer"""
+    \"\"\"Token context manager for accessing the token buffer\"\"\"
     def __init__(self, adapter):
         self._adapter = adapter
         
     def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
-        """Get text from the token buffer"""
+        \"\"\"Get text from the token buffer\"\"\"
         return self._adapter.token_registry.get_buffer_text(window_name, size)
         
     def get_execution_history(self) -> List[Dict[str, Any]]:
-        """Get the execution history"""
+        \"\"\"Get the execution history\"\"\"
         return self._adapter.token_registry.get_execution_history()
         
     def get_buffer_stats(self) -> Dict[str, Any]:
-        """Get statistics about the token buffer"""
+        \"\"\"Get statistics about the token buffer\"\"\"
         return self._adapter.token_registry.get_buffer_stats()
         
     def get_last_execution_context(self) -> Dict[str, Any]:
-        """Get the context from the last execution"""
+        \"\"\"Get the context from the last execution\"\"\"
         return self._adapter.execution_context.copy()
 
 # Create token context instance
@@ -2796,24 +2796,24 @@ import sys, os, re, json, time
 from typing import Dict, List, Any, Optional
 
 class TokenContext:
-    """Token context manager for accessing the token buffer"""
+    \"\"\"Token context manager for accessing the token buffer\"\"\"
     def __init__(self, adapter):
         self._adapter = adapter
         
     def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
-        """Get text from the token buffer"""
+        \"\"\"Get text from the token buffer\"\"\"
         return self._adapter.token_registry.get_buffer_text(window_name, size)
         
     def get_execution_history(self) -> List[Dict[str, Any]]:
-        """Get the execution history"""
+        \"\"\"Get the execution history\"\"\"
         return self._adapter.token_registry.get_execution_history()
         
     def get_buffer_stats(self) -> Dict[str, Any]:
-        """Get statistics about the token buffer"""
+        \"\"\"Get statistics about the token buffer\"\"\"
         return self._adapter.token_registry.get_buffer_stats()
         
     def get_last_execution_context(self) -> Dict[str, Any]:
-        """Get the context from the last execution"""
+        \"\"\"Get the context from the last execution\"\"\"
         return self._adapter.execution_context.copy()
 
 # Create token context instance
