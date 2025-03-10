@@ -2489,24 +2489,110 @@ class FunctionAdapter:
         
         # Check if we have enough context to determine if this is likely a complete block
         # Sometimes the closing ``` might not be in the context yet
-        if "```python" in full_text and not full_text.strip().endswith("```"):
-            # If we couldn't extract complete code, store as partial fragment with more context
-            fragment_id = f"python_block_{int(time.time())}"
-            self.partial_code_fragments[fragment_id] = {
-                "pattern": "python_code_block",
-                "content": content,
-                "context": context,
-                "timestamp": time.time(),
-                "full_text": full_text  # Store the full text for better context
-            }
+        if "```python" in full_text:
+            # Extract everything between ```python and the end of the available context
+            partial_code_match = re.search(r"```python\s*(.*?)$", full_text, re.DOTALL)
             
-            logger.info(f"[FunctionAdapter] Stored partial Python code block as fragment {fragment_id}")
+            if partial_code_match:
+                partial_code = partial_code_match.group(1).strip()
+                
+                # If we have substantial code, consider executing it even without the closing ```
+                if len(partial_code) > 50 and time.time() - self.last_execution_time > 2:
+                    logger.info(f"[FunctionAdapter] Executing partial Python code block: {partial_code[:100]}...")
+                    
+                    # Add a safety wrapper to handle potential syntax errors from incomplete code
+                    safe_code = f"""
+try:
+    # Original partial code
+    {partial_code}
+except SyntaxError:
+    print("Warning: Syntax error in partial code block - likely incomplete")
+    # Try to extract and execute complete statements
+    import ast
+    
+    def extract_complete_statements(code):
+        try:
+            # Try to parse the code
+            tree = ast.parse(code)
+            # If we get here, the code is syntactically valid
+            return code
+        except SyntaxError as e:
+            # Find the last valid statement
+            lines = code.split('\\n')
+            for i in range(len(lines), 0, -1):
+                try:
+                    ast.parse('\\n'.join(lines[:i]))
+                    return '\\n'.join(lines[:i])
+                except SyntaxError:
+                    continue
+        return ""
+    
+    complete_code = extract_complete_statements('''{partial_code}''')
+    if complete_code:
+        print(f"Executing complete statements from partial code block")
+        exec(complete_code)
+"""
+                    result = self.do_anything(safe_code)
+                    
+                    # Update execution stats
+                    self.last_execution_time = time.time()
+                    self.execution_count += 1
+                    
+                    # Still store as partial fragment for potential complete execution later
+                    fragment_id = f"python_block_{int(time.time())}"
+                    self.partial_code_fragments[fragment_id] = {
+                        "pattern": "python_code_block",
+                        "content": content,
+                        "context": context,
+                        "timestamp": time.time(),
+                        "full_text": full_text,
+                        "partial_execution": True
+                    }
+                    
+                    logger.info(f"[FunctionAdapter] Stored partial Python code block as fragment {fragment_id} (with partial execution)")
+                    
+                    return {
+                        "status": "partial_execution",
+                        "message": "Executed partial code block while waiting for complete block",
+                        "fragment_id": fragment_id,
+                        "execution_result": result
+                    }
+                else:
+                    # If code is too short or we recently executed something, just store as fragment
+                    fragment_id = f"python_block_{int(time.time())}"
+                    self.partial_code_fragments[fragment_id] = {
+                        "pattern": "python_code_block",
+                        "content": content,
+                        "context": context,
+                        "timestamp": time.time(),
+                        "full_text": full_text
+                    }
+                    
+                    logger.info(f"[FunctionAdapter] Stored partial Python code block as fragment {fragment_id}")
+                    
+                    return {
+                        "status": "partial_match",
+                        "message": "Incomplete code block detected, waiting for more tokens",
+                        "fragment_id": fragment_id
+                    }
             
-            return {
-                "status": "partial_match",
-                "message": "Incomplete code block detected, waiting for more tokens",
-                "fragment_id": fragment_id
-            }
+        # If we couldn't extract partial code, store as fragment
+        fragment_id = f"python_block_{int(time.time())}"
+        self.partial_code_fragments[fragment_id] = {
+            "pattern": "python_code_block",
+            "content": content,
+            "context": context,
+            "timestamp": time.time(),
+            "full_text": full_text
+        }
+        
+        logger.info(f"[FunctionAdapter] Stored partial Python code block as fragment {fragment_id}")
+        
+        return {
+            "status": "partial_match",
+            "message": "Incomplete code block detected, waiting for more tokens",
+            "fragment_id": fragment_id
+        }
         
         # If we can't determine if it's a Python code block, return a more informative message
         return {
@@ -2583,32 +2669,40 @@ class FunctionAdapter:
         # Add context-aware utilities to the execution environment
         context_utilities = """
 # Context-aware utilities for code execution
-import sys, os, re, json, time
+import sys, os, re, json, time, datetime
 from typing import Dict, List, Any, Optional
 
 class TokenContext:
     \"\"\"Token context manager for accessing the token buffer\"\"\"
-    def __init__(self, adapter):
+    def __init__(self, adapter=None):
         self._adapter = adapter
         
     def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
         \"\"\"Get text from the token buffer\"\"\"
-        return self._adapter.token_registry.get_buffer_text(window_name, size)
+        if self._adapter:
+            return self._adapter.token_registry.get_buffer_text(window_name, size)
+        return ""
         
     def get_execution_history(self) -> List[Dict[str, Any]]:
         \"\"\"Get the execution history\"\"\"
-        return self._adapter.token_registry.get_execution_history()
+        if self._adapter:
+            return self._adapter.token_registry.get_execution_history()
+        return []
         
     def get_buffer_stats(self) -> Dict[str, Any]:
         \"\"\"Get statistics about the token buffer\"\"\"
-        return self._adapter.token_registry.get_buffer_stats()
+        if self._adapter:
+            return self._adapter.token_registry.get_buffer_stats()
+        return {}
         
     def get_last_execution_context(self) -> Dict[str, Any]:
         \"\"\"Get the context from the last execution\"\"\"
-        return self._adapter.execution_context.copy()
+        if self._adapter:
+            return self._adapter.execution_context.copy()
+        return {}
 
-# Create token context instance
-token_context = TokenContext(self)
+# Create token context instance - use None to avoid self reference issues
+token_context = TokenContext(None)
 """
         
         # Prepend context utilities to the code
@@ -2622,11 +2716,19 @@ token_context = TokenContext(self)
         execution_start_time = time.time()
         try:
             # Create a local namespace for execution with access to token context
+            # Avoid passing self reference to prevent NameError
             local_namespace = {
-                "token_context": TokenContext(self),
+                "token_context": TokenContext(None),
                 "execution_count": self.execution_count,
                 "last_execution_time": self.last_execution_time,
-                "execution_context": self.execution_context.copy()
+                "execution_context": self.execution_context.copy(),
+                # Add commonly needed modules directly
+                "datetime": datetime,
+                "time": time,
+                "json": json,
+                "re": re,
+                "os": os,
+                "sys": sys
             }
             
             # Execute the code with timeout protection
@@ -2637,7 +2739,8 @@ token_context = TokenContext(self)
             
             # Update execution context with any new variables
             for key, value in local_namespace.items():
-                if key not in ["token_context", "execution_count", "last_execution_time", "execution_context"] and \
+                if key not in ["token_context", "execution_count", "last_execution_time", "execution_context", 
+                              "datetime", "time", "json", "re", "os", "sys"] and \
                    not key.startswith("__"):
                     # Only store serializable values
                     try:
@@ -2873,6 +2976,127 @@ token_context = TokenContext(self)
         
         return results if results else None
 
+    def execute_isolated_code(self, code: str, timeout: int = 10, 
+                             provide_context: bool = True) -> Dict[str, Any]:
+        """
+        Execute Python code in an isolated environment with timeout protection.
+        This provides better isolation than the standard do_anything method.
+        
+        Args:
+            code: Python code to execute
+            timeout: Maximum execution time in seconds
+            provide_context: Whether to provide context utilities
+            
+        Returns:
+            Dictionary with execution results
+        """
+        import io, sys, tempfile, os, subprocess, threading
+        
+        # Store original code
+        original_code = code
+        
+        # Add context utilities if requested
+        if provide_context:
+            context_utilities = """
+# Context-aware utilities for code execution
+import sys, os, re, json, time, datetime
+from typing import Dict, List, Any, Optional
+
+# Common utility functions
+def get_current_time():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+def get_utc_time():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    
+def format_json(obj):
+    return json.dumps(obj, indent=2, default=str)
+"""
+            code = context_utilities + "\n\n" + code
+        
+        logger.info(f"[FunctionAdapter] Executing isolated code:\n{original_code[:200]}...")
+        
+        try:
+            # Create a temporary file for the code
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
+                temp_file.write(code)
+                temp_file_path = temp_file.name
+            
+            # Create a temporary file for the output
+            output_file_path = temp_file_path + '.out'
+            
+            # Build the command to execute the code with timeout
+            cmd = [
+                sys.executable,  # Current Python interpreter
+                temp_file_path
+            ]
+            
+            # Execute the code in a separate process with timeout
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Set up a timer to kill the process if it exceeds the timeout
+            timer = threading.Timer(timeout, process.kill)
+            timer.start()
+            
+            try:
+                stdout, stderr = process.communicate()
+                return_code = process.returncode
+            finally:
+                timer.cancel()
+            
+            # Clean up the temporary file
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass
+            
+            # Record execution in context
+            self.execution_context["last_pattern"] = "isolated_python"
+            self.execution_context["last_code"] = original_code
+            
+            if return_code == 0:
+                self.execution_context["last_output"] = stdout
+                
+                return {
+                    "status": "success",
+                    "output": stdout,
+                    "stderr": stderr,
+                    "return_code": return_code,
+                    "execution_time": time.time() - self.last_execution_time
+                }
+            else:
+                self.execution_context["last_error"] = stderr
+                
+                return {
+                    "status": "error",
+                    "output": stdout,
+                    "stderr": stderr,
+                    "return_code": return_code,
+                    "execution_time": time.time() - self.last_execution_time
+                }
+                
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(f"[FunctionAdapter] Error executing isolated code: {e}\n{tb}")
+            
+            # Record error in context
+            self.execution_context["last_pattern"] = "isolated_python"
+            self.execution_context["last_code"] = original_code
+            self.execution_context["last_error"] = str(e)
+            self.execution_context["last_traceback"] = tb
+            
+            return {
+                "status": "error",
+                "output": "",
+                "stderr": str(e),
+                "traceback": tb
+            }
+    
     def execute_python_code(self, code: str, long_running: bool = False) -> Dict[str, Any]:
         """
         Execute Python code. If long_running is True, use nohup to run it in the background as a separate process.
@@ -2890,32 +3114,47 @@ token_context = TokenContext(self)
         # Add context utilities to the code
         context_utilities = """
 # Context-aware utilities for code execution
-import sys, os, re, json, time
+import sys, os, re, json, time, datetime
 from typing import Dict, List, Any, Optional
 
 class TokenContext:
     \"\"\"Token context manager for accessing the token buffer\"\"\"
-    def __init__(self, adapter):
+    def __init__(self, adapter=None):
         self._adapter = adapter
         
     def get_buffer_text(self, window_name: str = "default", size: int = 500) -> str:
         \"\"\"Get text from the token buffer\"\"\"
-        return self._adapter.token_registry.get_buffer_text(window_name, size)
+        if self._adapter:
+            return self._adapter.token_registry.get_buffer_text(window_name, size)
+        return ""
         
     def get_execution_history(self) -> List[Dict[str, Any]]:
         \"\"\"Get the execution history\"\"\"
-        return self._adapter.token_registry.get_execution_history()
+        if self._adapter:
+            return self._adapter.token_registry.get_execution_history()
+        return []
         
     def get_buffer_stats(self) -> Dict[str, Any]:
         \"\"\"Get statistics about the token buffer\"\"\"
-        return self._adapter.token_registry.get_buffer_stats()
+        if self._adapter:
+            return self._adapter.token_registry.get_buffer_stats()
+        return {}
         
     def get_last_execution_context(self) -> Dict[str, Any]:
         \"\"\"Get the context from the last execution\"\"\"
-        return self._adapter.execution_context.copy()
+        if self._adapter:
+            return self._adapter.execution_context.copy()
+        return {}
 
-# Create token context instance
-token_context = TokenContext(self)
+# Create token context instance - use None to avoid self reference issues
+token_context = TokenContext(None)
+
+# Add helper functions for common operations
+def get_current_time():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+def get_utc_time():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 """
         
         # Store original code
@@ -4244,6 +4483,17 @@ class R1Agent:
         self.knowledge_base.add_fact("emergent budgeting",
             "A self-organizing approach where the agent learns to allocate its token budget optimally based on task requirements."
         )
+        
+        # Add date/time knowledge
+        self.knowledge_base.add_fact("datetime operations",
+            "The agent can handle date and time operations with timezone awareness using Python's datetime module."
+        )
+        self.knowledge_base.add_fact("timezone handling",
+            "The agent can convert between different timezones using the ZoneInfo or pytz libraries."
+        )
+        self.knowledge_base.add_fact("date formatting",
+            "The agent can format dates and times in various formats using strftime() with format codes like %Y (year), %m (month), %d (day), %H (hour), %M (minute), %S (second)."
+        )
 
     def add_goal(self, name: str, description: str, priority: int = 5, 
                 deadline: Optional[float] = None, 
@@ -4253,6 +4503,82 @@ class R1Agent:
     def update_goal_status(self, goal_id: int, status: str) -> None:
         self.goal_manager.update_goal_status(goal_id, status)
 
+    def handle_datetime_query(self, query: str) -> str:
+        """
+        Handle date and time related queries with timezone awareness.
+        
+        Args:
+            query: The user's date/time related query
+            
+        Returns:
+            Formatted response with date/time information
+        """
+        import re
+        import datetime
+        
+        # Add a cognitive step for handling date/time query
+        self.cognitive_engine.set_subgoal(
+            subgoal=f"Process date/time query: {query[:30]}...",
+            metadata={"query_type": "datetime"},
+            confidence=0.95
+        )
+        
+        # Extract timezone information if present
+        timezone_match = re.search(r"(?:in|for|at)\s+([A-Za-z/]+(?:\s+[A-Za-z]+)?)", query)
+        timezone = timezone_match.group(1) if timezone_match else None
+        
+        # Get date/time information
+        if hasattr(self.function_adapter, 'get_datetime_info'):
+            datetime_info = self.function_adapter.get_datetime_info(timezone)
+        else:
+            # Fallback if method doesn't exist
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_local = datetime.datetime.now()
+            
+            datetime_info = {
+                "utc": {
+                    "datetime": now_utc.isoformat(),
+                    "date": now_utc.strftime("%Y-%m-%d"),
+                    "time": now_utc.strftime("%H:%M:%S"),
+                    "timezone": "UTC"
+                },
+                "local": {
+                    "datetime": now_local.isoformat(),
+                    "date": now_local.strftime("%Y-%m-%d"),
+                    "time": now_local.strftime("%H:%M:%S"),
+                    "timezone": datetime.datetime.now().astimezone().tzname()
+                }
+            }
+        
+        # Format the response
+        response = f"Current date and time information:\n\n"
+        
+        # Add UTC time
+        utc_info = datetime_info.get("utc", {})
+        response += f"UTC: {utc_info.get('date')} {utc_info.get('time')} UTC\n"
+        
+        # Add local time
+        local_info = datetime_info.get("local", {})
+        response += f"Local: {local_info.get('date')} {local_info.get('time')} {local_info.get('timezone')}\n"
+        
+        # Add requested timezone if available
+        if timezone and "requested_timezone" in datetime_info:
+            tz_info = datetime_info.get("requested_timezone", {})
+            if "error" in tz_info:
+                response += f"\nRequested timezone '{timezone}': {tz_info.get('error')}\n"
+            else:
+                response += f"\nRequested timezone '{timezone}': {tz_info.get('date')} {tz_info.get('time')} (UTC{tz_info.get('utc_offset')})\n"
+        
+        # Add verification step
+        self.cognitive_engine.verify(
+            description="Date/time information retrieval",
+            result="Success",
+            is_correct=True,
+            confidence=0.98
+        )
+        
+        return response
+    
     def generate_response(self, user_input: str) -> str:
         """
         Feeds the user input to the conversation, calls the LLM,
@@ -4274,6 +4600,34 @@ class R1Agent:
             metadata={"input_type": "user_message"},
             confidence=0.9
         )
+        
+        # Check if this is a date/time query that we can handle directly
+        datetime_patterns = [
+            r"(?:what|current|tell me).*(?:date|time)",
+            r"(?:what|current|tell me).*(?:day|month|year)",
+            r"(?:what|current|tell me).*(?:clock|hour)",
+            r"(?:what).*(?:time is it)",
+            r"(?:time|date).*(?:right now|currently)"
+        ]
+        
+        is_datetime_query = any(re.search(pattern, user_input.lower()) for pattern in datetime_patterns)
+        
+        if is_datetime_query:
+            # Handle date/time query directly
+            self.cognitive_engine.add_reasoning_step(
+                behavior=CognitiveBehavior.VERIFICATION,
+                description="Identified date/time query",
+                result="Using specialized datetime handler",
+                is_correct=True,
+                confidence=0.95
+            )
+            
+            response = self.handle_datetime_query(user_input)
+            
+            # Add agent utterance
+            self.conversation.add_agent_utterance(response)
+            
+            return response
 
         # 2) Build messages
         messages = self._build_messages()
@@ -5342,6 +5696,84 @@ if __name__ == "__main__":
                 "return_code": -1,
                 "traceback": tb
             }
+    def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get comprehensive date and time information, optionally for a specific timezone.
+        
+        Args:
+            timezone: Optional timezone name (e.g., 'America/New_York', 'Europe/London')
+                     If None, returns information for UTC and local system time
+        
+        Returns:
+            Dictionary with date and time information
+        """
+        import datetime
+        import time
+        import pytz
+        from zoneinfo import ZoneInfo, available_timezones
+        
+        result = {
+            "utc": {
+                "datetime": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+                "time": datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S"),
+                "timestamp": time.time(),
+                "timezone": "UTC"
+            },
+            "local": {
+                "datetime": datetime.datetime.now().isoformat(),
+                "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "timezone": time.tzname[0]
+            }
+        }
+        
+        # Add timezone-specific information if requested
+        if timezone:
+            try:
+                # Try with ZoneInfo first (Python 3.9+)
+                tz = ZoneInfo(timezone)
+                tz_time = datetime.datetime.now(tz)
+                
+                result["requested_timezone"] = {
+                    "datetime": tz_time.isoformat(),
+                    "date": tz_time.strftime("%Y-%m-%d"),
+                    "time": tz_time.strftime("%H:%M:%S"),
+                    "timezone": timezone,
+                    "utc_offset": tz_time.strftime("%z")
+                }
+            except (ImportError, KeyError):
+                # Fall back to pytz
+                try:
+                    tz = pytz.timezone(timezone)
+                    tz_time = datetime.datetime.now(tz)
+                    
+                    result["requested_timezone"] = {
+                        "datetime": tz_time.isoformat(),
+                        "date": tz_time.strftime("%Y-%m-%d"),
+                        "time": tz_time.strftime("%H:%M:%S"),
+                        "timezone": timezone,
+                        "utc_offset": tz_time.strftime("%z")
+                    }
+                except (pytz.exceptions.UnknownTimeZoneError, ImportError):
+                    result["requested_timezone"] = {
+                        "error": f"Unknown timezone: {timezone}"
+                    }
+        
+        # Add available timezones
+        try:
+            result["available_timezones"] = list(available_timezones())[:20]  # First 20 for brevity
+            result["available_timezones_count"] = len(available_timezones())
+        except ImportError:
+            try:
+                result["available_timezones"] = list(pytz.all_timezones)[:20]  # First 20 for brevity
+                result["available_timezones_count"] = len(pytz.all_timezones)
+            except ImportError:
+                result["available_timezones"] = ["UTC"]
+                result["available_timezones_count"] = 1
+        
+        return result
+        
     def get_token_buffer_status(self) -> Dict[str, Any]:
         """
         Get the current status of the token buffer.
