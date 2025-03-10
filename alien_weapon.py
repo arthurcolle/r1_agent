@@ -4515,6 +4515,7 @@ class R1Agent:
         """
         import re
         import datetime
+        import time
         
         # Add a cognitive step for handling date/time query
         self.cognitive_engine.set_subgoal(
@@ -4527,47 +4528,148 @@ class R1Agent:
         timezone_match = re.search(r"(?:in|for|at)\s+([A-Za-z/]+(?:\s+[A-Za-z]+)?)", query)
         timezone = timezone_match.group(1) if timezone_match else None
         
-        # Get date/time information
-        if hasattr(self.function_adapter, 'get_datetime_info'):
-            datetime_info = self.function_adapter.get_datetime_info(timezone)
-        else:
-            # Fallback if method doesn't exist
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            now_local = datetime.datetime.now()
+        # Execute Python code directly to get accurate time information
+        time_code = """
+import datetime
+import time
+from zoneinfo import ZoneInfo
+import pytz
+
+# Get current times
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+now_local = datetime.datetime.now()
+
+# Format the times
+utc_date = now_utc.strftime("%Y-%m-%d")
+utc_time = now_utc.strftime("%H:%M:%S")
+local_date = now_local.strftime("%Y-%m-%d")
+local_time = now_local.strftime("%H:%M:%S")
+timestamp = time.time()
+
+# Get timezone name
+try:
+    local_timezone = now_local.astimezone().tzname()
+except:
+    local_timezone = time.tzname[0]
+
+# Create result dictionary
+result = {
+    "utc": {
+        "datetime": now_utc.isoformat(),
+        "date": utc_date,
+        "time": utc_time,
+        "timestamp": timestamp,
+        "timezone": "UTC"
+    },
+    "local": {
+        "datetime": now_local.isoformat(),
+        "date": local_date,
+        "time": local_time,
+        "timezone": local_timezone
+    }
+}
+
+# Handle specific timezone if requested
+requested_timezone = None
+if requested_timezone:
+    try:
+        # Try with ZoneInfo first (Python 3.9+)
+        tz = ZoneInfo(requested_timezone)
+        tz_time = datetime.datetime.now(tz)
+        
+        result["requested_timezone"] = {
+            "datetime": tz_time.isoformat(),
+            "date": tz_time.strftime("%Y-%m-%d"),
+            "time": tz_time.strftime("%H:%M:%S"),
+            "timezone": requested_timezone,
+            "utc_offset": tz_time.strftime("%z")
+        }
+    except (ImportError, KeyError):
+        # Fall back to pytz
+        try:
+            tz = pytz.timezone(requested_timezone)
+            tz_time = datetime.datetime.now(tz)
             
-            datetime_info = {
-                "utc": {
-                    "datetime": now_utc.isoformat(),
-                    "date": now_utc.strftime("%Y-%m-%d"),
-                    "time": now_utc.strftime("%H:%M:%S"),
-                    "timezone": "UTC"
-                },
-                "local": {
-                    "datetime": now_local.isoformat(),
-                    "date": now_local.strftime("%Y-%m-%d"),
-                    "time": now_local.strftime("%H:%M:%S"),
-                    "timezone": datetime.datetime.now().astimezone().tzname()
-                }
+            result["requested_timezone"] = {
+                "datetime": tz_time.isoformat(),
+                "date": tz_time.strftime("%Y-%m-%d"),
+                "time": tz_time.strftime("%H:%M:%S"),
+                "timezone": requested_timezone,
+                "utc_offset": tz_time.strftime("%z")
             }
+        except:
+            result["requested_timezone"] = {
+                "error": f"Unknown timezone: {requested_timezone}"
+            }
+
+# Print the results for direct execution
+print(f"UTC: {utc_date} {utc_time} UTC")
+print(f"Local: {local_date} {local_time} {local_timezone}")
+"""
         
-        # Format the response
-        response = f"Current date and time information:\n\n"
+        # Replace the timezone placeholder if needed
+        if timezone:
+            time_code = time_code.replace('requested_timezone = None', f'requested_timezone = "{timezone}"')
         
-        # Add UTC time
-        utc_info = datetime_info.get("utc", {})
-        response += f"UTC: {utc_info.get('date')} {utc_info.get('time')} UTC\n"
+        # Execute the code to get accurate time information
+        result = self.function_adapter.do_anything(time_code)
         
-        # Add local time
-        local_info = datetime_info.get("local", {})
-        response += f"Local: {local_info.get('date')} {local_info.get('time')} {local_info.get('timezone')}\n"
-        
-        # Add requested timezone if available
-        if timezone and "requested_timezone" in datetime_info:
-            tz_info = datetime_info.get("requested_timezone", {})
-            if "error" in tz_info:
-                response += f"\nRequested timezone '{timezone}': {tz_info.get('error')}\n"
-            else:
-                response += f"\nRequested timezone '{timezone}': {tz_info.get('date')} {tz_info.get('time')} (UTC{tz_info.get('utc_offset')})\n"
+        # Extract the output from the execution result
+        if result and result.get("status") == "success" and result.get("output"):
+            # Use the direct output from the executed code
+            response = "Current date and time information:\n\n" + result.get("output")
+        else:
+            # Fallback to the original method if execution fails
+            try:
+                # Get date/time information using the function adapter if available
+                if hasattr(self.function_adapter, 'get_datetime_info'):
+                    datetime_info = self.function_adapter.get_datetime_info(timezone)
+                else:
+                    # Manual fallback
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    now_local = datetime.datetime.now()
+                    
+                    datetime_info = {
+                        "utc": {
+                            "datetime": now_utc.isoformat(),
+                            "date": now_utc.strftime("%Y-%m-%d"),
+                            "time": now_utc.strftime("%H:%M:%S"),
+                            "timezone": "UTC"
+                        },
+                        "local": {
+                            "datetime": now_local.isoformat(),
+                            "date": now_local.strftime("%Y-%m-%d"),
+                            "time": now_local.strftime("%H:%M:%S"),
+                            "timezone": str(datetime.datetime.now().astimezone().tzname() or time.tzname[0])
+                        }
+                    }
+                
+                # Format the response
+                response = f"Current date and time information:\n\n"
+                
+                # Add UTC time
+                utc_info = datetime_info.get("utc", {})
+                response += f"UTC: {utc_info.get('date')} {utc_info.get('time')} UTC\n"
+                
+                # Add local time
+                local_info = datetime_info.get("local", {})
+                response += f"Local: {local_info.get('date')} {local_info.get('time')} {local_info.get('timezone')}\n"
+                
+                # Add requested timezone if available
+                if timezone and "requested_timezone" in datetime_info:
+                    tz_info = datetime_info.get("requested_timezone", {})
+                    if "error" in tz_info:
+                        response += f"\nRequested timezone '{timezone}': {tz_info.get('error')}\n"
+                    else:
+                        response += f"\nRequested timezone '{timezone}': {tz_info.get('date')} {tz_info.get('time')} (UTC{tz_info.get('utc_offset')})\n"
+            except Exception as e:
+                # Ultimate fallback if everything else fails
+                now = datetime.datetime.now()
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                response = f"Current date and time information:\n\n"
+                response += f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                response += f"Local: {now.strftime('%Y-%m-%d %H:%M:%S')} {time.tzname[0]}\n"
+                response += f"\nNote: Simplified output due to error: {str(e)}\n"
         
         # Add verification step
         self.cognitive_engine.verify(
@@ -4607,7 +4709,12 @@ class R1Agent:
             r"(?:what|current|tell me).*(?:day|month|year)",
             r"(?:what|current|tell me).*(?:clock|hour)",
             r"(?:what).*(?:time is it)",
-            r"(?:time|date).*(?:right now|currently)"
+            r"(?:time|date).*(?:right now|currently)",
+            r"(?:what|current).*(?:datetime)",
+            r"(?:today'?s date)",
+            r"(?:now|current).*(?:moment|instant)",
+            r"(?:what day is|today is)",
+            r"(?:date and time)"
         ]
         
         is_datetime_query = any(re.search(pattern, user_input.lower()) for pattern in datetime_patterns)
@@ -5707,45 +5814,142 @@ if __name__ == "__main__":
         Returns:
             Dictionary with date and time information
         """
-        import datetime
-        import time
-        import pytz
-        from zoneinfo import ZoneInfo, available_timezones
+        try:
+            # Use direct code execution for more reliable results
+            time_code = """
+import datetime
+import time
+import json
+from zoneinfo import ZoneInfo, available_timezones
+import pytz
+
+# Get current times
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+now_local = datetime.datetime.now()
+
+# Format the times
+result = {
+    "utc": {
+        "datetime": now_utc.isoformat(),
+        "date": now_utc.strftime("%Y-%m-%d"),
+        "time": now_utc.strftime("%H:%M:%S"),
+        "timestamp": time.time(),
+        "timezone": "UTC"
+    },
+    "local": {
+        "datetime": now_local.isoformat(),
+        "date": now_local.strftime("%Y-%m-%d"),
+        "time": now_local.strftime("%H:%M:%S"),
+        "timezone": str(now_local.astimezone().tzname() or time.tzname[0])
+    }
+}
+
+# Add timezone-specific information if requested
+requested_timezone = None
+"""
+            
+            # Add timezone handling if specified
+            if timezone:
+                time_code = time_code.replace('requested_timezone = None', f'requested_timezone = "{timezone}"')
+                time_code += """
+if requested_timezone:
+    try:
+        # Try with ZoneInfo first (Python 3.9+)
+        tz = ZoneInfo(requested_timezone)
+        tz_time = datetime.datetime.now(tz)
         
-        result = {
-            "utc": {
-                "datetime": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
-                "time": datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S"),
-                "timestamp": time.time(),
-                "timezone": "UTC"
-            },
-            "local": {
-                "datetime": datetime.datetime.now().isoformat(),
-                "date": datetime.datetime.now().strftime("%Y-%m-%d"),
-                "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                "timezone": time.tzname[0]
-            }
+        result["requested_timezone"] = {
+            "datetime": tz_time.isoformat(),
+            "date": tz_time.strftime("%Y-%m-%d"),
+            "time": tz_time.strftime("%H:%M:%S"),
+            "timezone": requested_timezone,
+            "utc_offset": tz_time.strftime("%z")
         }
-        
-        # Add timezone-specific information if requested
-        if timezone:
-            try:
-                # Try with ZoneInfo first (Python 3.9+)
-                tz = ZoneInfo(timezone)
-                tz_time = datetime.datetime.now(tz)
-                
-                result["requested_timezone"] = {
-                    "datetime": tz_time.isoformat(),
-                    "date": tz_time.strftime("%Y-%m-%d"),
-                    "time": tz_time.strftime("%H:%M:%S"),
-                    "timezone": timezone,
-                    "utc_offset": tz_time.strftime("%z")
-                }
-            except (ImportError, KeyError):
-                # Fall back to pytz
+    except (ImportError, KeyError):
+        # Fall back to pytz
+        try:
+            tz = pytz.timezone(requested_timezone)
+            tz_time = datetime.datetime.now(tz)
+            
+            result["requested_timezone"] = {
+                "datetime": tz_time.isoformat(),
+                "date": tz_time.strftime("%Y-%m-%d"),
+                "time": tz_time.strftime("%H:%M:%S"),
+                "timezone": requested_timezone,
+                "utc_offset": tz_time.strftime("%z")
+            }
+        except Exception as e:
+            result["requested_timezone"] = {
+                "error": f"Unknown timezone: {requested_timezone}",
+                "exception": str(e)
+            }
+"""
+            
+            # Add timezone list
+            time_code += """
+# Add available timezones
+try:
+    result["available_timezones"] = list(available_timezones())[:20]  # First 20 for brevity
+    result["available_timezones_count"] = len(available_timezones())
+except ImportError:
+    try:
+        result["available_timezones"] = list(pytz.all_timezones)[:20]  # First 20 for brevity
+        result["available_timezones_count"] = len(pytz.all_timezones)
+    except ImportError:
+        result["available_timezones"] = ["UTC"]
+        result["available_timezones_count"] = 1
+
+# Return the result as JSON
+print(json.dumps(result, default=str))
+result  # For return value
+"""
+            
+            # Execute the code
+            execution_result = self.do_anything(time_code)
+            
+            if execution_result and execution_result.get("status") == "success":
+                # Try to parse the output as JSON
+                import json
                 try:
-                    tz = pytz.timezone(timezone)
+                    if "output" in execution_result and execution_result["output"]:
+                        return json.loads(execution_result["output"])
+                    elif "result" in execution_result and execution_result["result"]:
+                        return execution_result["result"]
+                except json.JSONDecodeError:
+                    pass
+            
+            # If execution or parsing failed, fall back to the original implementation
+            raise Exception("Direct execution failed, falling back to manual implementation")
+            
+        except Exception as e:
+            # Fall back to the original implementation if execution fails
+            import datetime
+            import time
+            import pytz
+            from zoneinfo import ZoneInfo, available_timezones
+            
+            result = {
+                "utc": {
+                    "datetime": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+                    "time": datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S"),
+                    "timestamp": time.time(),
+                    "timezone": "UTC"
+                },
+                "local": {
+                    "datetime": datetime.datetime.now().isoformat(),
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                    "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "timezone": str(datetime.datetime.now().astimezone().tzname() or time.tzname[0])
+                },
+                "error": str(e)
+            }
+            
+            # Add timezone-specific information if requested
+            if timezone:
+                try:
+                    # Try with ZoneInfo first (Python 3.9+)
+                    tz = ZoneInfo(timezone)
                     tz_time = datetime.datetime.now(tz)
                     
                     result["requested_timezone"] = {
@@ -5755,25 +5959,143 @@ if __name__ == "__main__":
                         "timezone": timezone,
                         "utc_offset": tz_time.strftime("%z")
                     }
-                except (pytz.exceptions.UnknownTimeZoneError, ImportError):
-                    result["requested_timezone"] = {
-                        "error": f"Unknown timezone: {timezone}"
-                    }
-        
-        # Add available timezones
-        try:
-            result["available_timezones"] = list(available_timezones())[:20]  # First 20 for brevity
-            result["available_timezones_count"] = len(available_timezones())
-        except ImportError:
+                except (ImportError, KeyError):
+                    # Fall back to pytz
+                    try:
+                        tz = pytz.timezone(timezone)
+                        tz_time = datetime.datetime.now(tz)
+                        
+                        result["requested_timezone"] = {
+                            "datetime": tz_time.isoformat(),
+                            "date": tz_time.strftime("%Y-%m-%d"),
+                            "time": tz_time.strftime("%H:%M:%S"),
+                            "timezone": timezone,
+                            "utc_offset": tz_time.strftime("%z")
+                        }
+                    except (pytz.exceptions.UnknownTimeZoneError, ImportError):
+                        result["requested_timezone"] = {
+                            "error": f"Unknown timezone: {timezone}"
+                        }
+            
+            # Add available timezones
             try:
-                result["available_timezones"] = list(pytz.all_timezones)[:20]  # First 20 for brevity
-                result["available_timezones_count"] = len(pytz.all_timezones)
+                result["available_timezones"] = list(available_timezones())[:20]  # First 20 for brevity
+                result["available_timezones_count"] = len(available_timezones())
             except ImportError:
-                result["available_timezones"] = ["UTC"]
-                result["available_timezones_count"] = 1
+                try:
+                    result["available_timezones"] = list(pytz.all_timezones)[:20]  # First 20 for brevity
+                    result["available_timezones_count"] = len(pytz.all_timezones)
+                except ImportError:
+                    result["available_timezones"] = ["UTC"]
+                    result["available_timezones_count"] = 1
+            
+            return result
         
-        return result
+    def execute_datetime_code(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Execute date/time related code in an isolated environment.
+        This provides a more reliable way to get accurate date/time information.
         
+        Args:
+            timezone: Optional timezone name
+            
+        Returns:
+            Dictionary with date and time information
+        """
+        # Create a simple script to get date/time information
+        script = """
+import datetime
+import time
+import json
+import sys
+
+# Get current times
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+now_local = datetime.datetime.now()
+
+# Format the times
+result = {
+    "utc": {
+        "datetime": now_utc.isoformat(),
+        "date": now_utc.strftime("%Y-%m-%d"),
+        "time": now_utc.strftime("%H:%M:%S"),
+        "timestamp": time.time(),
+        "timezone": "UTC"
+    },
+    "local": {
+        "datetime": now_local.isoformat(),
+        "date": now_local.strftime("%Y-%m-%d"),
+        "time": now_local.strftime("%H:%M:%S"),
+        "timezone": str(now_local.astimezone().tzname() or time.tzname[0])
+    }
+}
+
+# Add timezone-specific information if requested
+requested_timezone = None
+"""
+        
+        # Add timezone handling if specified
+        if timezone:
+            script = script.replace('requested_timezone = None', f'requested_timezone = "{timezone}"')
+            script += """
+if requested_timezone:
+    try:
+        # Try with ZoneInfo first (Python 3.9+)
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(requested_timezone)
+        tz_time = datetime.datetime.now(tz)
+        
+        result["requested_timezone"] = {
+            "datetime": tz_time.isoformat(),
+            "date": tz_time.strftime("%Y-%m-%d"),
+            "time": tz_time.strftime("%H:%M:%S"),
+            "timezone": requested_timezone,
+            "utc_offset": tz_time.strftime("%z")
+        }
+    except (ImportError, KeyError):
+        # Fall back to pytz
+        try:
+            import pytz
+            tz = pytz.timezone(requested_timezone)
+            tz_time = datetime.datetime.now(tz)
+            
+            result["requested_timezone"] = {
+                "datetime": tz_time.isoformat(),
+                "date": tz_time.strftime("%Y-%m-%d"),
+                "time": tz_time.strftime("%H:%M:%S"),
+                "timezone": requested_timezone,
+                "utc_offset": tz_time.strftime("%z")
+            }
+        except Exception as e:
+            result["requested_timezone"] = {
+                "error": f"Unknown timezone: {requested_timezone}",
+                "exception": str(e)
+            }
+"""
+        
+        # Add output
+        script += """
+# Print the result as JSON
+print(json.dumps(result, default=str))
+"""
+        
+        # Execute the script in an isolated environment
+        result = self.execute_isolated_code(script, timeout=5, provide_context=False)
+        
+        # Parse the output as JSON
+        if result and result.get("status") == "success" and result.get("output"):
+            try:
+                import json
+                return json.loads(result["output"])
+            except json.JSONDecodeError:
+                pass
+        
+        # Return a simple error result if execution failed
+        return {
+            "error": "Failed to execute date/time code",
+            "execution_result": result
+        }
+    
     def get_token_buffer_status(self) -> Dict[str, Any]:
         """
         Get the current status of the token buffer.
