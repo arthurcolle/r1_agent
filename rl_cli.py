@@ -2074,6 +2074,12 @@ class SelfTransformation:
         self.test_instances = {}  # Stores test instances of the agent
         self.test_results = {}    # Stores test results
         self.sync_lock = asyncio.Lock()  # Lock for synchronizing DB operations
+        self.cognitive_feedback = []  # Store cognitive feedback on transformations
+        self.auto_execute_scripts = True  # Whether to auto-execute generated scripts
+        self.script_output_dir = "./generated_scripts"  # Directory for generated scripts
+        
+        # Create script output directory if it doesn't exist
+        os.makedirs(self.script_output_dir, exist_ok=True)
         
         # Set up the sync handler to connect the components
         self.code_manager.set_sync_handler(self.sync_memory_code_with_database)
@@ -2380,6 +2386,9 @@ class SelfTransformation:
             if not self.code_manager.compile_code():
                 raise ValueError("Transformed code failed to compile")
                 
+            # Generate a standalone script from the transformation if appropriate
+            script_path = await self._generate_script_from_transformation(transformation)
+            
             # Sync changes with the database
             await self._sync_code_with_database(transformation)
                 
@@ -2389,7 +2398,8 @@ class SelfTransformation:
                 "timestamp": datetime.now().isoformat(),
                 "success": True,
                 "autonomous": autonomous,
-                "test_results": test_results
+                "test_results": test_results,
+                "script_path": script_path
             })
             
             # Track code evolution
@@ -2401,12 +2411,16 @@ class SelfTransformation:
                     "suggestion": transformation["suggestion"],
                     "timestamp": datetime.now().isoformat(),
                     "autonomous": autonomous,
-                    "test_results": test_results
+                    "test_results": test_results,
+                    "script_path": script_path
                 }
             )
             
             # Generate visualization
             self.evolution_tracker.visualize()
+            
+            # Collect cognitive feedback on the transformation
+            await self._collect_cognitive_feedback(transformation, test_results)
             
             if autonomous:
                 self.changes_counter += 1
@@ -2419,6 +2433,10 @@ class SelfTransformation:
             
             # Clean up test instance
             await self.cleanup_test_instance(instance_id)
+            
+            # Execute the generated script if auto-execute is enabled
+            if script_path and self.auto_execute_scripts:
+                await self._execute_generated_script(script_path)
             
             # Signal for agent restart if needed
             if not autonomous:
@@ -2959,6 +2977,11 @@ class SelfTransformation:
             Suggestion: {transformation['suggestion']}
             
             Extract patterns and principles that led to success.
+            Provide specific insights on:
+            1. What made this transformation effective
+            2. How it could be further improved
+            3. What patterns should be applied to future transformations
+            4. Any potential risks or edge cases to watch for
             """
             
             messages = [
@@ -2984,40 +3007,518 @@ class SelfTransformation:
             
             logging.info(f"Learned from transformation: {learning['analysis'][:100]}...")
             
+            # Add to transformation history with learning insights
+            transformation_id = transformation.get("id", str(uuid.uuid4()))
+            self.transformation_history.append({
+                "id": transformation_id,
+                "transformation": transformation,
+                "learning": learning,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            return learning
+            
         except Exception as e:
             logging.error(f"Error in learning from transformation: {e}")
             self.learning_rate *= 0.9  # Decrease learning rate on failure
+            return None
 
     def _parse_code_changes(self, suggestion: str) -> List[Dict[str, Any]]:
         """Parse transformation suggestion into concrete changes"""
-        # Basic parsing for now - could be enhanced with more sophisticated parsing
+        # Enhanced parsing with better support for different change formats
         changes = []
         lines = suggestion.split("\n")
         current_change = None
         
-        for line in lines:
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Handle CHANGE format
             if line.startswith("CHANGE:"):
                 if current_change:
                     changes.append(current_change)
-                current_change = {"operation": "line", "params": {}}
+                
+                # Extract line number if present on the same line
+                parts = line.split()
+                if len(parts) > 1 and parts[1].isdigit():
+                    line_number = int(parts[1])
+                    current_change = {"operation": "line", "params": {"line_number": line_number}}
+                else:
+                    current_change = {"operation": "line", "params": {}}
+                
+            # Handle BLOCK format
             elif line.startswith("BLOCK:"):
                 if current_change:
                     changes.append(current_change)
-                current_change = {"operation": "block", "params": {}}
-            elif current_change and line.strip():
-                # Add parameters to current change based on content
-                if "line_number" not in current_change["params"]:
-                    try:
-                        current_change["params"]["line_number"] = int(line)
-                    except ValueError:
-                        current_change["params"]["content"] = line
+                
+                # Extract markers if present on the same line
+                parts = line.split(":", 1)
+                if len(parts) > 1 and parts[1].strip():
+                    marker_info = parts[1].strip()
+                    if " to " in marker_info:
+                        start_marker, end_marker = marker_info.split(" to ", 1)
+                        current_change = {"operation": "block", "params": {
+                            "start_marker": start_marker.strip(),
+                            "end_marker": end_marker.strip(),
+                            "new_block": []
+                        }}
+                    else:
+                        current_change = {"operation": "block", "params": {
+                            "start_marker": marker_info.strip(),
+                            "end_marker": "",
+                            "new_block": []
+                        }}
                 else:
-                    current_change["params"]["content"] = line
+                    current_change = {"operation": "block", "params": {}}
+            
+            # Handle FILE format (for creating/modifying whole files)
+            elif line.startswith("FILE:"):
+                if current_change:
+                    changes.append(current_change)
+                
+                # Extract file path
+                parts = line.split(":", 1)
+                if len(parts) > 1:
+                    file_path = parts[1].strip()
+                    current_change = {"operation": "file", "params": {
+                        "file_path": file_path,
+                        "content": []
+                    }}
+                else:
+                    current_change = {"operation": "file", "params": {}}
+            
+            # Handle SCRIPT format (for generating standalone scripts)
+            elif line.startswith("SCRIPT:"):
+                if current_change:
+                    changes.append(current_change)
+                
+                # Extract script name
+                parts = line.split(":", 1)
+                if len(parts) > 1:
+                    script_name = parts[1].strip()
+                    current_change = {"operation": "script", "params": {
+                        "script_name": script_name,
+                        "content": []
+                    }}
+                else:
+                    current_change = {"operation": "script", "params": {
+                        "script_name": f"script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py",
+                        "content": []
+                    }}
+            
+            # Handle content for current change
+            elif current_change:
+                if current_change["operation"] == "line":
+                    if "line_number" not in current_change["params"]:
+                        try:
+                            current_change["params"]["line_number"] = int(line)
+                        except ValueError:
+                            if "content" not in current_change["params"]:
+                                current_change["params"]["content"] = line
+                            else:
+                                current_change["params"]["content"] += "\n" + line
+                    else:
+                        if "content" not in current_change["params"]:
+                            current_change["params"]["content"] = line
+                        else:
+                            current_change["params"]["content"] += "\n" + line
+                
+                elif current_change["operation"] == "block":
+                    if "start_marker" not in current_change["params"]:
+                        current_change["params"]["start_marker"] = line
+                    elif "end_marker" not in current_change["params"] or not current_change["params"]["end_marker"]:
+                        if line.startswith("END:") or line.startswith("END BLOCK"):
+                            current_change["params"]["end_marker"] = line.split(":", 1)[1].strip() if ":" in line else ""
+                        else:
+                            current_change["params"]["new_block"].append(line)
+                    else:
+                        current_change["params"]["new_block"].append(line)
+                
+                elif current_change["operation"] == "file" or current_change["operation"] == "script":
+                    current_change["params"]["content"].append(line)
+            
+            i += 1
         
+        # Add the last change if there is one
         if current_change:
+            # For file/script operations, join the content lines
+            if current_change["operation"] in ["file", "script"] and "content" in current_change["params"]:
+                current_change["params"]["content"] = "\n".join(current_change["params"]["content"])
+            
+            # For block operations, join the new_block lines
+            if current_change["operation"] == "block" and "new_block" in current_change["params"]:
+                current_change["params"]["new_block"] = "\n".join(current_change["params"]["new_block"])
+            
             changes.append(current_change)
             
         return changes
+        
+    async def _generate_script_from_transformation(self, transformation: Dict[str, Any]) -> Optional[str]:
+        """
+        Generate a standalone script from a transformation
+        
+        Args:
+            transformation: The transformation dictionary
+            
+        Returns:
+            Optional[str]: Path to the generated script, or None if no script was generated
+        """
+        try:
+            # Check if the transformation contains script operations
+            changes = self._parse_code_changes(transformation["suggestion"])
+            script_changes = [c for c in changes if c["operation"] == "script"]
+            
+            if not script_changes:
+                # No explicit script operations, try to generate a script from the transformation
+                script_name = f"auto_transform_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
+                script_path = os.path.join(self.script_output_dir, script_name)
+                
+                # Generate script content
+                script_content = self._generate_script_content(transformation, script_name)
+                
+                # Write script to file
+                with open(script_path, "w") as f:
+                    f.write(script_content)
+                
+                # Make script executable
+                os.chmod(script_path, 0o755)
+                
+                logging.info(f"Generated script: {script_path}")
+                return script_path
+            
+            # Process explicit script operations
+            for script_change in script_changes:
+                script_name = script_change["params"].get("script_name", f"script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py")
+                script_content = script_change["params"].get("content", "")
+                
+                if not script_content:
+                    continue
+                
+                # Ensure script has .py extension
+                if not script_name.endswith(".py"):
+                    script_name += ".py"
+                
+                script_path = os.path.join(self.script_output_dir, script_name)
+                
+                # Write script to file
+                with open(script_path, "w") as f:
+                    f.write(script_content)
+                
+                # Make script executable
+                os.chmod(script_path, 0o755)
+                
+                logging.info(f"Generated script from explicit operation: {script_path}")
+                return script_path
+            
+            return None
+            
+        except Exception as e:
+            logging.error(f"Error generating script from transformation: {e}")
+            return None
+    
+    def _generate_script_content(self, transformation: Dict[str, Any], script_name: str) -> str:
+        """
+        Generate content for a standalone script based on a transformation
+        
+        Args:
+            transformation: The transformation dictionary
+            script_name: Name of the script
+            
+        Returns:
+            str: Content for the script
+        """
+        # Extract information from the transformation
+        original_content = transformation.get("original", {}).get("content", "")
+        suggestion = transformation.get("suggestion", "")
+        
+        # Generate script header
+        header = f"""#!/usr/bin/env python3
+# {script_name}
+# Auto-generated script from transformation at {datetime.now().isoformat()}
+# 
+# This script demonstrates and tests the code transformation.
+# It can be executed directly to see the effects of the transformation.
+
+import os
+import sys
+import logging
+import traceback
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Original code (for reference)
+ORIGINAL_CODE = '''
+{original_content}
+'''
+
+# Transformed code
+TRANSFORMED_CODE = '''
+{self._extract_transformed_code(transformation)}
+'''
+
+def run_test():
+    \"\"\"Run tests on the transformed code\"\"\"
+    logger.info("Testing transformed code...")
+    
+    try:
+        # Execute the transformed code
+        namespace = {{}}
+        exec(TRANSFORMED_CODE, namespace)
+        
+        # Try to identify functions or classes to test
+        test_candidates = [
+            name for name, obj in namespace.items()
+            if callable(obj) and not name.startswith('_')
+        ]
+        
+        if test_candidates:
+            logger.info(f"Found test candidates: {{test_candidates}}")
+            for name in test_candidates:
+                try:
+                    logger.info(f"Testing {{name}}...")
+                    result = namespace[name]()
+                    logger.info(f"Result: {{result}}")
+                except Exception as e:
+                    logger.error(f"Error testing {{name}}: {{e}}")
+        else:
+            logger.info("No test candidates found, executing as module")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error executing transformed code: {{e}}")
+        logger.error(traceback.format_exc())
+        return False
+
+def main():
+    \"\"\"Main entry point\"\"\"
+    logger.info(f"Running {{os.path.basename(__file__)}}")
+    
+    success = run_test()
+    
+    if success:
+        logger.info("Transformation test completed successfully")
+        return 0
+    else:
+        logger.error("Transformation test failed")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+        
+        return header
+    
+    def _extract_transformed_code(self, transformation: Dict[str, Any]) -> str:
+        """
+        Extract the transformed code from a transformation
+        
+        Args:
+            transformation: The transformation dictionary
+            
+        Returns:
+            str: The transformed code
+        """
+        # Try to extract transformed code from the suggestion
+        suggestion = transformation.get("suggestion", "")
+        
+        # Look for code blocks in the suggestion
+        import re
+        code_blocks = re.findall(r'```(?:python)?\n(.*?)```', suggestion, re.DOTALL)
+        
+        if code_blocks:
+            # Return the largest code block
+            return max(code_blocks, key=len)
+        
+        # If no code blocks found, try to extract from the changes
+        changes = self._parse_code_changes(suggestion)
+        
+        code_parts = []
+        for change in changes:
+            if change["operation"] == "line" and "content" in change["params"]:
+                code_parts.append(change["params"]["content"])
+            elif change["operation"] == "block" and "new_block" in change["params"]:
+                code_parts.append(change["params"]["new_block"])
+            elif change["operation"] == "file" and "content" in change["params"]:
+                code_parts.append(change["params"]["content"])
+            elif change["operation"] == "script" and "content" in change["params"]:
+                code_parts.append(change["params"]["content"])
+        
+        if code_parts:
+            return "\n\n".join(code_parts)
+        
+        # Fallback: return the whole suggestion
+        return suggestion
+    
+    async def _execute_generated_script(self, script_path: str) -> Dict[str, Any]:
+        """
+        Execute a generated script and capture its output
+        
+        Args:
+            script_path: Path to the script to execute
+            
+        Returns:
+            Dict[str, Any]: Execution results
+        """
+        try:
+            logging.info(f"Executing generated script: {script_path}")
+            
+            # Create a task for tracking the execution
+            task = await self.agent.create_task(
+                title=f"Execute script: {os.path.basename(script_path)}",
+                description=f"Execute and monitor the generated script at {script_path}",
+                priority=3,
+                tags=["script", "auto-execute"]
+            )
+            
+            task_id = None
+            if task.get("success", False):
+                task_id = task.get("task_id")
+                await self.agent.update_task(task_id, status="in_progress")
+            
+            # Execute the script in a subprocess
+            start_time = time.time()
+            process = subprocess.Popen(
+                [sys.executable, script_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Set a timeout for the script execution
+            timeout = 60  # 60 seconds timeout
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                exit_code = process.returncode
+                success = exit_code == 0
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                exit_code = -1
+                success = False
+                stderr += "\nProcess timed out after {timeout} seconds"
+            
+            end_time = time.time()
+            execution_time = end_time - start_time
+            
+            # Prepare result
+            result = {
+                "script_path": script_path,
+                "success": success,
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "execution_time": execution_time
+            }
+            
+            # Update task with results
+            if task_id:
+                await self.agent.update_task(
+                    task_id=task_id,
+                    status="completed" if success else "failed",
+                    result=result
+                )
+            
+            # Log results
+            if success:
+                logging.info(f"Script executed successfully in {execution_time:.2f}s: {script_path}")
+            else:
+                logging.error(f"Script execution failed with exit code {exit_code}: {script_path}")
+                if stderr:
+                    logging.error(f"Error output: {stderr}")
+            
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error executing script: {e}")
+            if task_id:
+                await self.agent.update_task(
+                    task_id=task_id,
+                    status="failed",
+                    result={"error": str(e)}
+                )
+            return {
+                "script_path": script_path,
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def _collect_cognitive_feedback(self, transformation: Dict[str, Any], test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Collect cognitive feedback on a transformation
+        
+        Args:
+            transformation: The transformation dictionary
+            test_results: Results of testing the transformation
+            
+        Returns:
+            Dict[str, Any]: Cognitive feedback
+        """
+        try:
+            # Prepare prompt for cognitive feedback
+            feedback_prompt = f"""
+            Analyze this code transformation and provide cognitive feedback:
+            
+            Original code:
+            ```
+            {transformation['original']['content']}
+            ```
+            
+            Transformation suggestion:
+            ```
+            {transformation['suggestion']}
+            ```
+            
+            Test results:
+            ```
+            {json.dumps(test_results, indent=2)}
+            ```
+            
+            Provide detailed cognitive feedback on:
+            1. Quality of the transformation (clarity, correctness, efficiency)
+            2. Potential edge cases or risks not covered by tests
+            3. Alternative approaches that could have been taken
+            4. Learning opportunities for future transformations
+            5. Meta-cognitive assessment of the transformation process itself
+            """
+            
+            messages = [
+                {"role": "system", "content": "You are an expert code reviewer providing cognitive feedback on code transformations."},
+                {"role": "user", "content": feedback_prompt}
+            ]
+            
+            response = await client.chat.completions.create(
+                model="o3-mini",
+                messages=messages,
+                temperature=0.3
+            )
+            
+            feedback = {
+                "transformation_id": transformation.get("id", str(uuid.uuid4())),
+                "feedback": response.choices[0].message.content,
+                "timestamp": datetime.now().isoformat(),
+                "test_results": test_results
+            }
+            
+            # Store the feedback
+            self.cognitive_feedback.append(feedback)
+            
+            logging.info(f"Collected cognitive feedback on transformation: {feedback['feedback'][:100]}...")
+            
+            return feedback
+            
+        except Exception as e:
+            logging.error(f"Error collecting cognitive feedback: {e}")
+            return {
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
 
 class Task(BaseModel):
     """
@@ -5809,18 +6310,35 @@ class AgentCLI(cmd.Cmd):
         def do_enable_autonomous(self, arg):
             """Enable autonomous mode: enable_autonomous [max_changes]"""
             try:
-                max_changes = int(arg) if arg else 5
+                args = shlex.split(arg)
+                max_changes = int(args[0]) if args and args[0].isdigit() else 5
+                auto_execute = True
+                
+                # Check for additional flags
+                if len(args) > 1:
+                    for flag in args[1:]:
+                        if flag.lower() == "no-execute":
+                            auto_execute = False
+                
                 self.agent.self_transformation.autonomous_mode = True
                 self.agent.self_transformation.max_autonomous_changes = max_changes
                 self.agent.self_transformation.changes_counter = 0
+                self.agent.self_transformation.auto_execute_scripts = auto_execute
+                
                 print(f"Autonomous mode enabled with max {max_changes} changes")
+                print(f"Auto-execute scripts: {auto_execute}")
             except ValueError:
-                print("Invalid argument. Usage: enable_autonomous [max_changes]")
+                print("Invalid argument. Usage: enable_autonomous [max_changes] [no-execute]")
     
         def do_disable_autonomous(self, arg):
             """Disable autonomous mode: disable_autonomous"""
             self.agent.self_transformation.autonomous_mode = False
             print("Autonomous mode disabled")
+            
+        def do_toggle_auto_execute(self, arg):
+            """Toggle auto-execution of generated scripts: toggle_auto_execute"""
+            self.agent.self_transformation.auto_execute_scripts = not self.agent.self_transformation.auto_execute_scripts
+            print(f"Auto-execute scripts: {self.agent.self_transformation.auto_execute_scripts}")
             
         def do_view_memory_code(self, arg):
             """View in-memory code: view_memory_code [file_path]"""
@@ -6015,18 +6533,57 @@ class AgentCLI(cmd.Cmd):
                 print(f"- {h['timestamp']}: {h['metadata']['type']}")
                 
         def do_self_modify(self, arg):
-            """Request the agent to modify its own code: self_modify [target_function]"""
+            """Request the agent to modify its own code: self_modify [target_function] [options]"""
             if not arg:
-                print("Usage: self_modify [target_function or description]")
+                print("Usage: self_modify [target_function or description] [--script] [--execute]")
                 return
                 
-            prompt = f"Please modify your code to improve the {arg} functionality. Consider performance, readability, and error handling."
+            args = shlex.split(arg)
+            target = args[0]
+            
+            # Parse options
+            generate_script = "--script" in args
+            execute_script = "--execute" in args
+            
+            # Build prompt
+            prompt = f"Please modify your code to improve the {target} functionality. "
+            
+            if generate_script:
+                prompt += "Generate a standalone script that demonstrates the changes. "
+            
+            prompt += "Consider performance, readability, and error handling."
+            
             try:
-                print(f"Requesting self-modification for: {arg}")
+                print(f"Requesting self-modification for: {target}")
                 result = asyncio.run(self.agent.qa(self.current_conversation, prompt))
                 print(f"\nSelf-modification result: {result}")
+                
+                # Check if a script was generated
+                recent_transformations = self.agent.self_transformation.transformation_history[-5:]
+                for transformation in reversed(recent_transformations):
+                    if "script_path" in transformation and transformation["script_path"]:
+                        script_path = transformation["script_path"]
+                        print(f"\nGenerated script: {script_path}")
+                        
+                        # Execute the script if requested
+                        if execute_script or (generate_script and self.agent.self_transformation.auto_execute_scripts):
+                            print(f"Executing script: {script_path}")
+                            exec_result = asyncio.run(
+                                self.agent.self_transformation._execute_generated_script(script_path)
+                            )
+                            
+                            if exec_result["success"]:
+                                print(f"Script executed successfully in {exec_result['execution_time']:.2f}s")
+                            else:
+                                print(f"Script execution failed with exit code {exec_result['exit_code']}")
+                                if exec_result.get("stderr"):
+                                    print(f"Error output: {exec_result['stderr']}")
+                        
+                        break
+                
             except Exception as e:
                 print(f"Error during self-modification: {e}")
+                print(traceback.format_exc())
                 
         def do_polymorphic(self, arg):
             """Apply polymorphic transformations to code: polymorphic [file_path] [intensity]"""
@@ -6485,6 +7042,7 @@ class AgentCLI(cmd.Cmd):
             if self.agent.self_transformation.autonomous_mode:
                 print(f"  Changes made: {self.agent.self_transformation.changes_counter}")
                 print(f"  Max changes: {self.agent.self_transformation.max_autonomous_changes}")
+                print(f"  Auto-execute scripts: {self.agent.self_transformation.auto_execute_scripts}")
             
             # Check reflection status
             reflection_status = "Running" if self.agent._reflection_running else "Stopped"
@@ -6500,6 +7058,18 @@ class AgentCLI(cmd.Cmd):
             # Check conversation stats
             print(f"Current conversation: {self.current_conversation}")
             print(f"Conversation history: {len(self.agent.conversation_history)} entries")
+            
+            # Check transformation stats
+            transformations = len(self.agent.self_transformation.transformation_history)
+            cognitive_feedback = len(self.agent.self_transformation.cognitive_feedback)
+            print(f"Transformations: {transformations}")
+            print(f"Cognitive feedback entries: {cognitive_feedback}")
+            
+            # Check generated scripts
+            script_dir = self.agent.self_transformation.script_output_dir
+            if os.path.exists(script_dir):
+                scripts = [f for f in os.listdir(script_dir) if f.endswith('.py')]
+                print(f"Generated scripts: {len(scripts)}")
             
             # Check task stats
             pending_tasks = len(self.agent.task_manager.list_tasks(status="pending"))
@@ -6517,6 +7087,101 @@ class AgentCLI(cmd.Cmd):
                 print(f"Memory usage: {memory_usage:.1f} MB")
             except ImportError:
                 pass
+                
+        def do_list_scripts(self, arg):
+            """List generated scripts: list_scripts [pattern]"""
+            script_dir = self.agent.self_transformation.script_output_dir
+            if not os.path.exists(script_dir):
+                print(f"Script directory not found: {script_dir}")
+                return
+                
+            pattern = arg if arg else "*.py"
+            scripts = list(Path(script_dir).glob(pattern))
+            
+            if not scripts:
+                print(f"No scripts found matching pattern: {pattern}")
+                return
+                
+            print(f"\nFound {len(scripts)} scripts:")
+            for i, script_path in enumerate(sorted(scripts, key=lambda p: p.stat().st_mtime, reverse=True)):
+                mtime = datetime.fromtimestamp(script_path.stat().st_mtime)
+                size = script_path.stat().st_size
+                print(f"{i+1}. {script_path.name}")
+                print(f"   Created: {mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"   Size: {size/1024:.1f} KB")
+                
+        def do_run_script(self, arg):
+            """Run a generated script: run_script <script_name>"""
+            if not arg:
+                print("Usage: run_script <script_name>")
+                return
+                
+            script_dir = self.agent.self_transformation.script_output_dir
+            script_name = arg
+            
+            # Add .py extension if not present
+            if not script_name.endswith(".py"):
+                script_name += ".py"
+                
+            script_path = os.path.join(script_dir, script_name)
+            
+            if not os.path.exists(script_path):
+                print(f"Script not found: {script_path}")
+                return
+                
+            try:
+                print(f"Running script: {script_path}")
+                result = asyncio.run(
+                    self.agent.self_transformation._execute_generated_script(script_path)
+                )
+                
+                print("\nExecution results:")
+                print(f"Success: {result['success']}")
+                print(f"Exit code: {result['exit_code']}")
+                print(f"Execution time: {result['execution_time']:.2f}s")
+                
+                if result.get("stdout"):
+                    print("\nStandard output:")
+                    print(result["stdout"])
+                
+                if result.get("stderr"):
+                    print("\nError output:")
+                    print(result["stderr"])
+                    
+            except Exception as e:
+                print(f"Error running script: {e}")
+                print(traceback.format_exc())
+                
+        def do_show_cognitive_feedback(self, arg):
+            """Show cognitive feedback: show_cognitive_feedback [index]"""
+            feedback_entries = self.agent.self_transformation.cognitive_feedback
+            
+            if not feedback_entries:
+                print("No cognitive feedback entries available.")
+                return
+                
+            if arg:
+                try:
+                    index = int(arg)
+                    if 0 <= index < len(feedback_entries):
+                        feedback = feedback_entries[index]
+                        print(f"\nCognitive Feedback #{index}:")
+                        print(f"Timestamp: {feedback['timestamp']}")
+                        print(f"Transformation ID: {feedback['transformation_id']}")
+                        print("\nFeedback:")
+                        print(feedback['feedback'])
+                    else:
+                        print(f"Invalid index. Must be between 0 and {len(feedback_entries)-1}.")
+                except ValueError:
+                    print(f"Invalid argument. Usage: show_cognitive_feedback [index]")
+            else:
+                print(f"\nCognitive Feedback Entries ({len(feedback_entries)}):")
+                for i, feedback in enumerate(feedback_entries):
+                    timestamp = datetime.fromisoformat(feedback['timestamp'])
+                    print(f"{i}. {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    feedback_preview = feedback['feedback'][:100] + "..." if len(feedback['feedback']) > 100 else feedback['feedback']
+                    print(f"   {feedback_preview}")
+                print("\nUse 'show_cognitive_feedback <index>' to view full feedback.")
                 
         def do_batch(self, arg):
             """Run a batch of commands from a file: batch <filename>"""
@@ -6538,6 +7203,91 @@ class AgentCLI(cmd.Cmd):
                     self.onecmd(cmd)
             except Exception as e:
                 print(f"Error running batch file: {e}")
+                
+        def do_generate_script(self, arg):
+            """Generate a new script: generate_script <script_name> [description]"""
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: generate_script <script_name> [description]")
+                return
+                
+            script_name = args[0]
+            description = " ".join(args[1:]) if len(args) > 1 else "A utility script"
+            
+            # Add .py extension if not present
+            if not script_name.endswith(".py"):
+                script_name += ".py"
+                
+            try:
+                # Create prompt for script generation
+                prompt = f"""
+                Generate a standalone Python script named '{script_name}' that {description}.
+                
+                The script should:
+                1. Be well-documented with docstrings and comments
+                2. Include proper error handling
+                3. Have a main() function and proper command-line argument parsing
+                4. Be executable directly (with shebang line)
+                5. Include example usage in the docstring
+                
+                Return the complete script code in a code block.
+                """
+                
+                print(f"Generating script: {script_name}")
+                print(f"Description: {description}")
+                
+                # Get the script content from the agent
+                if not self.current_conversation:
+                    self.current_conversation = asyncio.run(self.agent.create_conversation())
+                
+                response = asyncio.run(self.agent.qa(self.current_conversation, prompt))
+                
+                # Extract code block from response
+                import re
+                code_blocks = re.findall(r'```(?:python)?\n(.*?)```', response, re.DOTALL)
+                
+                if not code_blocks:
+                    print("No code block found in the response. Using full response as script content.")
+                    script_content = response
+                else:
+                    script_content = code_blocks[0]
+                
+                # Save the script
+                script_dir = self.agent.self_transformation.script_output_dir
+                script_path = os.path.join(script_dir, script_name)
+                
+                with open(script_path, 'w') as f:
+                    f.write(script_content)
+                
+                # Make the script executable
+                os.chmod(script_path, 0o755)
+                
+                print(f"Script generated and saved to: {script_path}")
+                
+                # Ask if the user wants to execute the script
+                execute = input("Do you want to execute this script now? (y/n): ").lower().strip()
+                if execute == 'y':
+                    print(f"Executing script: {script_path}")
+                    result = asyncio.run(
+                        self.agent.self_transformation._execute_generated_script(script_path)
+                    )
+                    
+                    print("\nExecution results:")
+                    print(f"Success: {result['success']}")
+                    print(f"Exit code: {result['exit_code']}")
+                    print(f"Execution time: {result['execution_time']:.2f}s")
+                    
+                    if result.get("stdout"):
+                        print("\nStandard output:")
+                        print(result["stdout"])
+                    
+                    if result.get("stderr"):
+                        print("\nError output:")
+                        print(result["stderr"])
+                
+            except Exception as e:
+                print(f"Error generating script: {e}")
+                print(traceback.format_exc())
                 
         def do_save_history(self, arg):
             """Save conversation history to file: save_history <filename>"""
@@ -7254,20 +8004,24 @@ def print_usage():
     print("  --api                Run as a FastAPI server")
     print("  --rl [EPISODES]      Run RL bootstrap training with optional episode count")
     print("  --autonomous [MAX]   Start in autonomous self-improvement mode with optional max changes")
+    print("  --no-execute         Disable auto-execution of generated scripts")
     print("  --cli                Start in CLI mode (default)")
     print("  --dashboard          Start directly in dashboard mode")
     print("  --watch DIR          Watch directory for PDFs (default: ./pdfs)")
     print("  --port PORT          Set API server port (default: 8080)")
     print("  --host HOST          Set API server host (default: 0.0.0.0)")
     print("  --no-reflections     Disable background reflections")
+    print("  --scripts DIR        Set directory for generated scripts (default: ./generated_scripts)")
     print("  --db PATH            Set database path (default: ./agent.db)")
     print("  --debug              Enable debug logging")
     print("\nExamples:")
     print("  python rl_cli.py --cli                    # Start in CLI mode")
     print("  python rl_cli.py --api --port 9000        # Run API server on port 9000")
     print("  python rl_cli.py --autonomous 10          # Start with autonomous mode, max 10 changes")
+    print("  python rl_cli.py --autonomous 5 --no-execute  # Autonomous mode without script execution")
     print("  python rl_cli.py --rl 5                   # Run RL training with 5 episodes")
     print("  python rl_cli.py --watch ./documents      # Watch ./documents for PDFs")
+    print("  python rl_cli.py --scripts ./my_scripts   # Use custom directory for generated scripts")
 
 if __name__ == "__main__":
     # Check for restart signal
@@ -7287,12 +8041,14 @@ if __name__ == "__main__":
     parser.add_argument('--api', action='store_true', help='Run as a FastAPI server')
     parser.add_argument('--rl', nargs='?', const=3, type=int, help='Run RL bootstrap training with optional episode count')
     parser.add_argument('--autonomous', nargs='?', const=5, type=int, help='Start in autonomous self-improvement mode')
+    parser.add_argument('--no-execute', action='store_true', help='Disable auto-execution of generated scripts')
     parser.add_argument('--cli', action='store_true', help='Start in CLI mode (default)')
     parser.add_argument('--dashboard', action='store_true', help='Start directly in dashboard mode')
     parser.add_argument('--watch', type=str, default='./pdfs', help='Watch directory for PDFs')
     parser.add_argument('--port', type=int, default=8080, help='Set API server port')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Set API server host')
     parser.add_argument('--no-reflections', action='store_true', help='Disable background reflections')
+    parser.add_argument('--scripts', type=str, default='./generated_scripts', help='Set directory for generated scripts')
     parser.add_argument('--db', type=str, default='./agent.db', help='Set database path')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     
@@ -7323,9 +8079,17 @@ if __name__ == "__main__":
         # Set up PDF watcher with custom directory
         cli.setup_pdf_watcher(args.watch)
         
+        # Set scripts directory
+        cli.agent.self_transformation.script_output_dir = args.scripts
+        os.makedirs(args.scripts, exist_ok=True)
+        
         # Enable autonomous mode if requested
         if args.autonomous is not None:
-            cli.do_enable_autonomous(str(args.autonomous))
+            auto_execute_flag = "" if not args.no_execute else "no-execute"
+            cli.do_enable_autonomous(f"{args.autonomous} {auto_execute_flag}")
+        elif args.no_execute:
+            # Just disable auto-execute if autonomous mode not enabled
+            cli.agent.self_transformation.auto_execute_scripts = False
         
         # Start or disable reflections
         if args.no_reflections:
@@ -7338,5 +8102,7 @@ if __name__ == "__main__":
             cli.do_dashboard("")
         
         # Start CLI
-        print(f"Starting Agent CLI with {'autonomous mode' if args.autonomous else 'standard mode'}")
+        mode_str = "autonomous mode" if args.autonomous else "standard mode"
+        execute_str = "" if not args.no_execute else " (script auto-execution disabled)"
+        print(f"Starting Agent CLI with {mode_str}{execute_str}")
         cli.cmdloop()
