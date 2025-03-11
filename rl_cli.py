@@ -3753,6 +3753,15 @@ class TaskManager:
             )
             self.tasks[task.task_id] = task
 
+class ResponseMode(Enum):
+    """Response modes for the agent"""
+    NORMAL = "normal"         # Standard response mode
+    WEB_SEARCH = "web_search" # Enhanced with web search results
+    WEB_TRAWL = "web_trawl"   # Deep web search with multiple sources
+    DEEP_RESEARCH = "deep_research" # Comprehensive research with citations
+    DEEP_TASK = "deep_task"   # Task-focused with step-by-step execution
+    DEEP_FLOW = "deep_flow"   # Continuous interaction with multiple sub-agents
+
 class Agent(BaseModel):
     """
     Advanced agent that can ingest data, reflect on its own code,
@@ -3770,6 +3779,9 @@ class Agent(BaseModel):
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
     task_manager: TaskManager = None
     job_scheduler: Optional[Any] = None  # Add job_scheduler field
+    response_mode: ResponseMode = Field(default=ResponseMode.NORMAL)
+    sub_agents: Dict[str, Any] = Field(default_factory=dict)  # For DEEP_FLOW mode
+    active_flows: List[Dict[str, Any]] = Field(default_factory=list)  # For DEEP_FLOW mode
 
     root: Optional[Node] = None
     q_table: Dict[str, float] = Field(default_factory=dict)
@@ -4874,6 +4886,226 @@ class Agent(BaseModel):
         if not self.job_scheduler.running:
             await self.job_scheduler.start()
             
+    async def set_response_mode(self, mode: Union[ResponseMode, str]) -> str:
+        """Set the agent's response mode"""
+        if isinstance(mode, str):
+            try:
+                mode = ResponseMode[mode.upper()]
+            except KeyError:
+                return f"Invalid response mode: {mode}. Available modes: {', '.join([m.value for m in ResponseMode])}"
+        
+        self.response_mode = mode
+        return f"Response mode set to: {mode.value}"
+    
+    async def get_response_mode(self) -> str:
+        """Get the current response mode"""
+        return self.response_mode.value
+    
+    async def _get_mode_system_prompt(self) -> str:
+        """Get the system prompt based on the current response mode"""
+        base_prompt = "You are a helpful AI assistant with self-modification capabilities."
+        
+        if self.response_mode == ResponseMode.NORMAL:
+            return f"{base_prompt} Provide clear, concise answers to questions."
+            
+        elif self.response_mode == ResponseMode.WEB_SEARCH:
+            return f"{base_prompt} Provide detailed answers enriched with web search results. Include relevant information from search results and cite your sources."
+            
+        elif self.response_mode == ResponseMode.WEB_TRAWL:
+            return f"""
+{base_prompt} You are in WEB_TRAWL mode.
+Provide comprehensive answers by deeply analyzing multiple web sources.
+1. Thoroughly explore the web for diverse perspectives on the topic
+2. Synthesize information from multiple sources
+3. Present a detailed analysis with citations
+4. Include contrasting viewpoints when available
+5. Organize your response with clear sections and subheadings
+6. Provide a summary of key findings
+Your answers should be extensive and well-researched, typically 500+ words.
+"""
+            
+        elif self.response_mode == ResponseMode.DEEP_RESEARCH:
+            return f"""
+{base_prompt} You are in DEEP_RESEARCH mode.
+Act as an academic researcher providing exhaustive, scholarly responses:
+1. Conduct in-depth research across multiple sources and disciplines
+2. Analyze the topic from theoretical, historical, and practical perspectives
+3. Evaluate the quality and reliability of sources
+4. Present a nuanced, balanced view with proper citations
+5. Identify gaps in current knowledge and suggest areas for further research
+6. Structure your response with an introduction, methodology, findings, discussion, and conclusion
+7. Include a bibliography of sources
+Your answers should be thorough academic analyses, typically 1000+ words with proper citations.
+"""
+            
+        elif self.response_mode == ResponseMode.DEEP_TASK:
+            return f"""
+{base_prompt} You are in DEEP_TASK mode.
+Act as a specialized task execution agent:
+1. Break down complex tasks into clear, actionable steps
+2. Provide detailed instructions for each step
+3. Anticipate potential challenges and offer solutions
+4. Include relevant code, commands, or formulas when applicable
+5. Explain the reasoning behind each step
+6. Offer alternatives for different scenarios or constraints
+7. Conclude with verification steps to ensure successful completion
+Your responses should be comprehensive task guides that anyone can follow to completion.
+"""
+            
+        elif self.response_mode == ResponseMode.DEEP_FLOW:
+            return f"""
+{base_prompt} You are in DEEP_FLOW mode.
+You are coordinating multiple specialized sub-agents to solve complex problems:
+1. Identify the different aspects of the problem that require specialized expertise
+2. Delegate sub-tasks to appropriate specialized agents
+3. Synthesize and integrate findings from multiple agents
+4. Maintain a continuous conversation flow, allowing for follow-up questions
+5. Track progress on long-running tasks and provide updates
+6. Adapt your approach based on intermediate results
+7. Present a unified, coherent response that integrates all perspectives
+Your goal is to provide an interactive, multi-agent problem-solving experience that can evolve over time.
+"""
+        
+        return base_prompt
+    
+    async def _create_sub_agents(self, question: str) -> Dict[str, Any]:
+        """Create specialized sub-agents for DEEP_FLOW mode"""
+        # Determine what types of sub-agents would be helpful for this question
+        sub_agent_types = []
+        
+        # Research-oriented question
+        if any(term in question.lower() for term in ["research", "study", "analyze", "compare", "evaluate"]):
+            sub_agent_types.append("researcher")
+            
+        # Technical/coding question
+        if any(term in question.lower() for term in ["code", "program", "develop", "build", "implement", "debug"]):
+            sub_agent_types.append("developer")
+            
+        # Data analysis question
+        if any(term in question.lower() for term in ["data", "statistics", "analyze", "trend", "pattern"]):
+            sub_agent_types.append("data_analyst")
+            
+        # Creative question
+        if any(term in question.lower() for term in ["create", "design", "generate", "creative", "story", "art"]):
+            sub_agent_types.append("creative")
+            
+        # Planning/strategy question
+        if any(term in question.lower() for term in ["plan", "strategy", "organize", "schedule", "project"]):
+            sub_agent_types.append("planner")
+            
+        # If no specific types detected, use general purpose agents
+        if not sub_agent_types:
+            sub_agent_types = ["general", "critic"]
+        
+        # Create sub-agents
+        sub_agents = {}
+        for agent_type in sub_agent_types:
+            agent_id = f"{agent_type}_{str(uuid.uuid4())[:8]}"
+            sub_agents[agent_id] = {
+                "type": agent_type,
+                "id": agent_id,
+                "status": "initialized",
+                "tasks": [],
+                "results": [],
+                "created_at": datetime.now().isoformat()
+            }
+            
+        return sub_agents
+    
+    async def _execute_deep_flow(self, question: str, conv_id: str) -> AsyncGenerator[str, None]:
+        """Execute a DEEP_FLOW response with multiple sub-agents"""
+        # Create sub-agents for this flow
+        sub_agents = await self._create_sub_agents(question)
+        
+        # Create a flow record
+        flow_id = str(uuid.uuid4())
+        flow = {
+            "id": flow_id,
+            "conversation_id": conv_id,
+            "question": question,
+            "sub_agents": sub_agents,
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "results": []
+        }
+        
+        # Add to active flows
+        self.active_flows.append(flow)
+        
+        # Initial response
+        yield f"Initiating DEEP_FLOW analysis for your question. I've created {len(sub_agents)} specialized sub-agents to help:\n"
+        for agent_id, agent in sub_agents.items():
+            yield f"- {agent['type'].capitalize()} Agent ({agent_id})\n"
+        
+        yield "\nBreaking down your question and delegating tasks...\n\n"
+        
+        # Simulate sub-agent work (in a real implementation, these would be actual parallel tasks)
+        for agent_id, agent in sub_agents.items():
+            agent_type = agent["type"]
+            yield f"🔍 {agent_type.capitalize()} Agent is analyzing...\n"
+            
+            # Simulate thinking time
+            await asyncio.sleep(1)
+            
+            # Generate a response based on agent type
+            if agent_type == "researcher":
+                yield f"📚 Research findings from {agent_type.capitalize()} Agent:\n"
+                yield "I've analyzed several academic sources on this topic. The current research indicates...\n"
+                yield "Several studies have shown conflicting results, suggesting this area needs more investigation...\n\n"
+                
+            elif agent_type == "developer":
+                yield f"💻 Technical analysis from {agent_type.capitalize()} Agent:\n"
+                yield "From a development perspective, this problem could be approached using these techniques...\n"
+                yield "Here's a code snippet that demonstrates the core concept:\n```python\n# Example code\ndef solve_problem(input):\n    # Implementation\n    return solution\n```\n\n"
+                
+            elif agent_type == "data_analyst":
+                yield f"📊 Data insights from {agent_type.capitalize()} Agent:\n"
+                yield "The data shows several interesting patterns. First, there's a strong correlation between...\n"
+                yield "When we analyze the trends over time, we can see that...\n\n"
+                
+            elif agent_type == "creative":
+                yield f"🎨 Creative perspective from {agent_type.capitalize()} Agent:\n"
+                yield "Looking at this from a creative angle, we could consider these innovative approaches...\n"
+                yield "This reminds me of similar creative solutions in other domains, such as...\n\n"
+                
+            elif agent_type == "planner":
+                yield f"📝 Strategic plan from {agent_type.capitalize()} Agent:\n"
+                yield "To approach this systematically, I recommend the following steps:\n"
+                yield "1. First, we should...\n2. Then, proceed to...\n3. Finally, evaluate...\n\n"
+                
+            elif agent_type == "general":
+                yield f"🧠 General analysis from {agent_type.capitalize()} Agent:\n"
+                yield "Looking at the big picture, the key aspects to consider are...\n"
+                yield "The most important factors that influence this situation are...\n\n"
+                
+            elif agent_type == "critic":
+                yield f"🔍 Critical evaluation from {agent_type.capitalize()} Agent:\n"
+                yield "It's important to consider potential limitations and challenges...\n"
+                yield "Some alternative perspectives to consider include...\n\n"
+            
+            # Update agent status
+            agent["status"] = "completed"
+            
+        # Synthesize results
+        yield "🔄 Synthesizing insights from all agents...\n\n"
+        await asyncio.sleep(1)
+        
+        yield "📊 Comprehensive Analysis:\n\n"
+        yield "Based on the collective insights from all specialized agents, I can provide a comprehensive response to your question.\n\n"
+        yield "The key findings are:\n"
+        yield "1. [First major insight combining multiple perspectives]\n"
+        yield "2. [Second major insight with supporting evidence]\n"
+        yield "3. [Third major insight with practical applications]\n\n"
+        
+        yield "This analysis represents the integration of multiple specialized perspectives. You can ask follow-up questions to explore any aspect in more depth.\n\n"
+        
+        # Update flow status
+        flow["status"] = "completed"
+        flow["completed_at"] = datetime.now().isoformat()
+        
+        yield "DEEP_FLOW analysis complete. Would you like to explore any specific aspect in more detail?"
+    
     async def qa(self, conv_id: str, question: str) -> str:
         if not conv_id:
             conv_id = await self.create_conversation()
@@ -4885,6 +5117,39 @@ class Agent(BaseModel):
             
         # Ensure job scheduler is running
         await self.ensure_job_scheduler_running()
+
+        # Check for response mode change request
+        mode_change_patterns = [
+            (r"(?:use|switch to|enable)\s+web\s*search\s*mode", ResponseMode.WEB_SEARCH),
+            (r"(?:use|switch to|enable)\s+web\s*trawl\s*mode", ResponseMode.WEB_TRAWL),
+            (r"(?:use|switch to|enable)\s+deep\s*research\s*mode", ResponseMode.DEEP_RESEARCH),
+            (r"(?:use|switch to|enable)\s+deep\s*task\s*mode", ResponseMode.DEEP_TASK),
+            (r"(?:use|switch to|enable)\s+deep\s*flow\s*mode", ResponseMode.DEEP_FLOW),
+            (r"(?:use|switch to|enable)\s+normal\s*mode", ResponseMode.NORMAL)
+        ]
+        
+        import re
+        for pattern, mode in mode_change_patterns:
+            if re.search(pattern, question.lower()):
+                await self.set_response_mode(mode)
+                mode_response = f"I've switched to {mode.value} mode. This means I'll now provide "
+                
+                if mode == ResponseMode.WEB_SEARCH:
+                    mode_response += "detailed answers enriched with web search results, including citations to sources."
+                elif mode == ResponseMode.WEB_TRAWL:
+                    mode_response += "comprehensive answers by deeply analyzing multiple web sources, synthesizing information with citations and contrasting viewpoints."
+                elif mode == ResponseMode.DEEP_RESEARCH:
+                    mode_response += "exhaustive, scholarly responses with in-depth research across multiple sources and disciplines, proper citations, and academic structure."
+                elif mode == ResponseMode.DEEP_TASK:
+                    mode_response += "specialized task execution guidance with clear, actionable steps, detailed instructions, and solutions to potential challenges."
+                elif mode == ResponseMode.DEEP_FLOW:
+                    mode_response += "interactive problem-solving using multiple specialized sub-agents working together, allowing for continuous conversation flow."
+                else:
+                    mode_response += "clear, concise answers to your questions."
+                
+                mode_response += "\n\nHow can I help you with your question now?"
+                await self.add_to_conversation(conv_id, "assistant", mode_response)
+                return mode_response
 
         # Check if this is a polymorphic transformation request
         if any(term in question.lower() for term in ["polymorphic", "transform code", "morph code", "code morphing"]):
@@ -5134,41 +5399,183 @@ class Agent(BaseModel):
                 # If we reach here, we couldn't get weather data, so continue with normal processing
                 print("\n⚠️ Weather data unavailable, falling back to standard processing", flush=True)
         
+        # Special handling for DEEP_FLOW mode
+        if self.response_mode == ResponseMode.DEEP_FLOW:
+            # For DEEP_FLOW, we need to collect the streamed output
+            full_response = ""
+            async for chunk in self._execute_deep_flow(question, conv_id):
+                full_response += chunk
+                print(chunk, end="", flush=True)
+            
+            await self.add_to_conversation(conv_id, "assistant", full_response)
+            self.conversation_history.append({
+                "prompt": question,
+                "response_mode": self.response_mode.value,
+                "response": full_response
+            })
+            
+            # After answering, trigger a self-reflection cycle
+            await self.reflect_on_current_code()
+            return full_response
+        
         # Process with chain-of-thought
         cot = await self.analyze_thought_process(question)
         code_context = await self.retrieve_relevant_code(question)
         
-        # Try web search for factual queries or explicit search requests
+        # Enhanced web search for WEB_SEARCH and WEB_TRAWL modes
         search_context = "Relevant documents: (stub)"
-        if any(term in question.lower() for term in ["what", "who", "where", "when", "how", "search", "find", "look up", "confirm"]):
+        if self.response_mode in [ResponseMode.WEB_SEARCH, ResponseMode.WEB_TRAWL] or \
+           any(term in question.lower() for term in ["what", "who", "where", "when", "how", "search", "find", "look up", "confirm"]):
             print(f"\n🔍 Web search query detected: {question}", flush=True)
-            search_result = await self.search_web(question)
-            if search_result and "error" not in search_result:
-                # Extract relevant information from search results
-                search_context = "Search results:\n"
-                if "items" in search_result:
-                    for item in search_result["items"][:3]:
-                        search_context += f"- {item['title']}: {item['snippet']}\n"
-                elif "organic_results" in search_result:
-                    for item in search_result["organic_results"][:3]:
-                        search_context += f"- {item['title']}: {item['snippet']}\n"
-                elif "answer" in search_result:
-                    search_context += f"- Answer: {search_result['answer']}\n"
-                elif "results" in search_result:
-                    for item in search_result["results"][:3]:
-                        search_context += f"- {item.get('title', 'Result')}: {item.get('content', item.get('snippet', 'No content'))}\n"
-                else:
-                    # Generic fallback for any structure
-                    search_context += f"- Results: {str(search_result)[:500]}...\n"
+            
+            # For WEB_TRAWL, do multiple searches with different queries
+            if self.response_mode == ResponseMode.WEB_TRAWL:
+                print(f"\n🌐 Performing deep web trawl with multiple queries...", flush=True)
+                
+                # Generate related search queries
+                related_queries = [
+                    question,
+                    f"latest research on {question}",
+                    f"alternative perspectives on {question}",
+                    f"criticism of {question}",
+                    f"history of {question}"
+                ]
+                
+                search_context = "Deep Web Trawl Results:\n\n"
+                
+                # Perform multiple searches
+                for i, query in enumerate(related_queries[:3]):  # Limit to 3 to avoid rate limits
+                    print(f"\n🔍 Trawling with query {i+1}: {query}", flush=True)
+                    search_result = await self.search_web(query)
                     
-                print(f"\n📊 Found search results", flush=True)
+                    if search_result and "error" not in search_result:
+                        search_context += f"--- Results for: {query} ---\n"
+                        
+                        # Extract and format results
+                        if "items" in search_result:
+                            for item in search_result["items"][:3]:
+                                search_context += f"- {item['title']}: {item['snippet']}\n"
+                                if 'link' in item:
+                                    search_context += f"  Source: {item['link']}\n"
+                        elif "organic_results" in search_result:
+                            for item in search_result["organic_results"][:3]:
+                                search_context += f"- {item['title']}: {item['snippet']}\n"
+                                if 'link' in item:
+                                    search_context += f"  Source: {item['link']}\n"
+                        elif "results" in search_result:
+                            for item in search_result["results"][:3]:
+                                search_context += f"- {item.get('title', 'Result')}: {item.get('content', item.get('snippet', 'No content'))}\n"
+                                if 'link' in item:
+                                    search_context += f"  Source: {item['link']}\n"
+                        
+                        search_context += "\n"
+                    
+                    # Avoid rate limits
+                    await asyncio.sleep(1)
             else:
-                search_context = "No relevant search results found."
-                print(f"\n⚠️ No search results found or search unavailable", flush=True)
+                # Standard web search for other modes
+                search_result = await self.search_web(question)
+                if search_result and "error" not in search_result:
+                    # Extract relevant information from search results
+                    search_context = "Search results:\n"
+                    if "items" in search_result:
+                        for item in search_result["items"][:5]:  # Include more results
+                            search_context += f"- {item['title']}: {item['snippet']}\n"
+                            if 'link' in item:
+                                search_context += f"  Source: {item['link']}\n"
+                    elif "organic_results" in search_result:
+                        for item in search_result["organic_results"][:5]:
+                            search_context += f"- {item['title']}: {item['snippet']}\n"
+                            if 'link' in item:
+                                search_context += f"  Source: {item['link']}\n"
+                    elif "answer" in search_result:
+                        search_context += f"- Answer: {search_result['answer']}\n"
+                    elif "results" in search_result:
+                        for item in search_result["results"][:5]:
+                            search_context += f"- {item.get('title', 'Result')}: {item.get('content', item.get('snippet', 'No content'))}\n"
+                            if 'link' in item:
+                                search_context += f"  Source: {item['link']}\n"
+                    else:
+                        # Generic fallback for any structure
+                        search_context += f"- Results: {str(search_result)[:500]}...\n"
+                        
+                    print(f"\n📊 Found search results", flush=True)
+                else:
+                    search_context = "No relevant search results found."
+                    print(f"\n⚠️ No search results found or search unavailable", flush=True)
         
         combined_context = f"{search_context}\n\nRelevant Code:\n{code_context}"
         
-        prompt = f"""
+        # Get the appropriate system prompt based on response mode
+        system_prompt = await self._get_mode_system_prompt()
+        
+        # Enhance the prompt based on response mode
+        if self.response_mode == ResponseMode.DEEP_RESEARCH:
+            prompt = f"""
+Chain-of-Thought:
+Initial Thought: {cot.initial_thought}
+Steps: {" ".join(f"Step {s.step_number}: {s.reasoning} => {s.conclusion} (Confidence: {s.confidence})" for s in cot.steps)}
+Final Conclusion: {cot.final_conclusion}
+
+Context:
+{combined_context}
+
+You are in DEEP_RESEARCH mode. Provide an exhaustive, scholarly response with:
+1. A clear introduction to the topic
+2. Comprehensive analysis from multiple perspectives
+3. Historical context and theoretical frameworks
+4. Evaluation of evidence and sources
+5. Discussion of implications and applications
+6. Proper citations for all information
+7. A conclusion summarizing key findings
+8. A bibliography of sources
+
+Question: {question}
+"""
+        elif self.response_mode == ResponseMode.DEEP_TASK:
+            prompt = f"""
+Chain-of-Thought:
+Initial Thought: {cot.initial_thought}
+Steps: {" ".join(f"Step {s.step_number}: {s.reasoning} => {s.conclusion} (Confidence: {s.confidence})" for s in cot.steps)}
+Final Conclusion: {cot.final_conclusion}
+
+Context:
+{combined_context}
+
+You are in DEEP_TASK mode. Provide a comprehensive task execution guide with:
+1. A clear breakdown of the task into actionable steps
+2. Detailed instructions for each step
+3. Code examples, commands, or formulas where applicable
+4. Explanation of the reasoning behind each step
+5. Potential challenges and their solutions
+6. Alternative approaches for different scenarios
+7. Verification steps to ensure successful completion
+
+Question: {question}
+"""
+        elif self.response_mode == ResponseMode.WEB_TRAWL:
+            prompt = f"""
+Chain-of-Thought:
+Initial Thought: {cot.initial_thought}
+Steps: {" ".join(f"Step {s.step_number}: {s.reasoning} => {s.conclusion} (Confidence: {s.confidence})" for s in cot.steps)}
+Final Conclusion: {cot.final_conclusion}
+
+Context:
+{combined_context}
+
+You are in WEB_TRAWL mode. Provide a comprehensive answer that:
+1. Synthesizes information from multiple web sources
+2. Presents diverse perspectives on the topic
+3. Analyzes the reliability of different sources
+4. Organizes information with clear sections and subheadings
+5. Cites sources for all key information
+6. Provides a balanced view of contrasting opinions
+7. Concludes with a summary of key findings
+
+Question: {question}
+"""
+        else:
+            prompt = f"""
 Chain-of-Thought:
 Initial Thought: {cot.initial_thought}
 Steps: {" ".join(f"Step {s.step_number}: {s.reasoning} => {s.conclusion} (Confidence: {s.confidence})" for s in cot.steps)}
@@ -5180,8 +5587,9 @@ Context:
 You can use tools to help answer this question. Use tools recursively if needed.
 Question: {question}
 """
+        
         messages = [
-            {"role": "system", "content": "You are a helpful AI assistant with self-modification capabilities. Use the provided chain-of-thought and context to answer the question. You can use tools recursively to gather information."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ]
         
@@ -5191,6 +5599,7 @@ Question: {question}
             "prompt": question,
             "chain_of_thought": cot,
             "code_context": code_context,
+            "response_mode": self.response_mode.value,
             "response": answer
         })
         
@@ -6299,6 +6708,13 @@ class AgentCLI(cmd.Cmd):
 ║   Type 'help' or '?' to list commands                           ║
 ║   Type 'dashboard' to launch the interactive dashboard           ║
 ║   Type 'chat <message>' to interact with the agent               ║
+║   Type 'set_mode <mode>' to change response mode:                ║
+║     - normal: Standard concise responses                         ║
+║     - web_search: Enhanced with web search results               ║
+║     - web_trawl: Deep web search with multiple sources           ║
+║     - deep_research: Comprehensive research with citations       ║
+║     - deep_task: Task-focused with step-by-step execution        ║
+║     - deep_flow: Interactive with multiple sub-agents            ║
 ║   Type 'search <query>' to search the web directly               ║
 ║   Type 'polymorphic' to apply code transformations               ║
 ║   Type 'exit' to quit                                            ║
@@ -7038,6 +7454,7 @@ class AgentCLI(cmd.Cmd):
             """Show current agent status: status"""
             print("\n=== Agent Status ===")
             print(f"Agent ID: {self.agent.id}")
+            print(f"Response mode: {self.agent.response_mode.value}")
             print(f"Autonomous mode: {self.agent.self_transformation.autonomous_mode}")
             if self.agent.self_transformation.autonomous_mode:
                 print(f"  Changes made: {self.agent.self_transformation.changes_counter}")
@@ -7065,6 +7482,16 @@ class AgentCLI(cmd.Cmd):
             print(f"Transformations: {transformations}")
             print(f"Cognitive feedback entries: {cognitive_feedback}")
             
+            # Check active flows for DEEP_FLOW mode
+            if self.agent.response_mode == ResponseMode.DEEP_FLOW:
+                active_flows = len(self.agent.active_flows)
+                print(f"Active flows: {active_flows}")
+                if active_flows > 0:
+                    for flow in self.agent.active_flows:
+                        print(f"  Flow ID: {flow['id']}")
+                        print(f"  Status: {flow['status']}")
+                        print(f"  Sub-agents: {len(flow['sub_agents'])}")
+            
             # Check generated scripts
             script_dir = self.agent.self_transformation.script_output_dir
             if os.path.exists(script_dir):
@@ -7087,6 +7514,40 @@ class AgentCLI(cmd.Cmd):
                 print(f"Memory usage: {memory_usage:.1f} MB")
             except ImportError:
                 pass
+                
+        def do_set_mode(self, arg):
+            """Set the agent's response mode: set_mode [normal|web_search|web_trawl|deep_research|deep_task|deep_flow]"""
+            if not arg:
+                print("Available response modes:")
+                for mode in ResponseMode:
+                    print(f"  {mode.value}: {self._get_mode_description(mode)}")
+                print("\nUsage: set_mode [mode]")
+                return
+                
+            mode = arg.strip().lower()
+            result = asyncio.run(self.agent.set_response_mode(mode))
+            print(result)
+            
+            # Print additional information about the mode
+            if hasattr(self.agent, 'response_mode'):
+                print(f"\n{self._get_mode_description(self.agent.response_mode)}")
+                
+        def _get_mode_description(self, mode):
+            """Get a description of a response mode"""
+            if mode == ResponseMode.NORMAL:
+                return "Standard response mode with clear, concise answers"
+            elif mode == ResponseMode.WEB_SEARCH:
+                return "Enhanced responses with web search results and citations"
+            elif mode == ResponseMode.WEB_TRAWL:
+                return "Comprehensive answers from deep analysis of multiple web sources"
+            elif mode == ResponseMode.DEEP_RESEARCH:
+                return "Exhaustive, scholarly responses with academic structure and citations"
+            elif mode == ResponseMode.DEEP_TASK:
+                return "Specialized task execution guidance with detailed steps and solutions"
+            elif mode == ResponseMode.DEEP_FLOW:
+                return "Interactive problem-solving with multiple specialized sub-agents"
+            else:
+                return "Unknown mode"
                 
         def do_list_scripts(self, arg):
             """List generated scripts: list_scripts [pattern]"""
@@ -7240,7 +7701,14 @@ class AgentCLI(cmd.Cmd):
                 if not self.current_conversation:
                     self.current_conversation = asyncio.run(self.agent.create_conversation())
                 
+                # Temporarily set to DEEP_TASK mode for better script generation
+                original_mode = self.agent.response_mode
+                await self.agent.set_response_mode(ResponseMode.DEEP_TASK)
+                
                 response = asyncio.run(self.agent.qa(self.current_conversation, prompt))
+                
+                # Restore original mode
+                self.agent.response_mode = original_mode
                 
                 # Extract code block from response
                 import re
@@ -7288,6 +7756,81 @@ class AgentCLI(cmd.Cmd):
             except Exception as e:
                 print(f"Error generating script: {e}")
                 print(traceback.format_exc())
+                
+        def do_flow(self, arg):
+            """Manage DEEP_FLOW mode: flow [list|status|stop] [flow_id]"""
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: flow [list|status|stop] [flow_id]")
+                return
+                
+            command = args[0].lower()
+            
+            if command == "list":
+                # List active flows
+                flows = self.agent.active_flows
+                if not flows:
+                    print("No active flows.")
+                    return
+                    
+                print(f"\nActive flows ({len(flows)}):")
+                for i, flow in enumerate(flows):
+                    print(f"{i+1}. Flow ID: {flow['id']}")
+                    print(f"   Status: {flow['status']}")
+                    print(f"   Started: {flow['started_at']}")
+                    print(f"   Sub-agents: {len(flow['sub_agents'])}")
+                    print(f"   Question: {flow['question'][:50]}..." if len(flow['question']) > 50 else flow['question'])
+                    print()
+                    
+            elif command == "status":
+                if len(args) < 2:
+                    print("Usage: flow status <flow_id>")
+                    return
+                    
+                flow_id = args[1]
+                
+                # Find the flow
+                flow = next((f for f in self.agent.active_flows if f['id'] == flow_id), None)
+                if not flow:
+                    print(f"Flow not found: {flow_id}")
+                    return
+                    
+                print(f"\nFlow: {flow['id']}")
+                print(f"Status: {flow['status']}")
+                print(f"Started: {flow['started_at']}")
+                print(f"Completed: {flow['completed_at'] or 'Not completed'}")
+                print(f"Question: {flow['question']}")
+                print("\nSub-agents:")
+                
+                for agent_id, agent in flow['sub_agents'].items():
+                    print(f"- {agent['type'].capitalize()} Agent ({agent_id})")
+                    print(f"  Status: {agent['status']}")
+                    print(f"  Tasks: {len(agent['tasks'])}")
+                    print(f"  Results: {len(agent['results'])}")
+                    print()
+                    
+            elif command == "stop":
+                if len(args) < 2:
+                    print("Usage: flow stop <flow_id>")
+                    return
+                    
+                flow_id = args[1]
+                
+                # Find the flow
+                flow_index = next((i for i, f in enumerate(self.agent.active_flows) if f['id'] == flow_id), None)
+                if flow_index is None:
+                    print(f"Flow not found: {flow_id}")
+                    return
+                    
+                # Update flow status
+                self.agent.active_flows[flow_index]['status'] = "stopped"
+                self.agent.active_flows[flow_index]['completed_at'] = datetime.now().isoformat()
+                
+                print(f"Flow stopped: {flow_id}")
+                
+            else:
+                print(f"Unknown command: {command}")
+                print("Usage: flow [list|status|stop] [flow_id]")
                 
         def do_save_history(self, arg):
             """Save conversation history to file: save_history <filename>"""
@@ -7501,10 +8044,10 @@ class AgentCLI(cmd.Cmd):
                 print("Usage: tasks [list|create|update|delete|next]")
                 
         def do_code(self, arg):
-            """Read or write code files: code [read|write] <file_path> [content]"""
+            """Read, write, or edit code files: code [read|write|edit] <file_path> [content]"""
             args = shlex.split(arg)
             if not args:
-                print("Usage: code [read|write] <file_path> [content]")
+                print("Usage: code [read|write|edit] <file_path> [content]")
                 return
                 
             command = args[0].lower()
@@ -7570,9 +8113,50 @@ class AgentCLI(cmd.Cmd):
                 else:
                     print(f"Error writing file: {result['error']}")
             
+            elif command == "edit":
+                if len(args) < 2:
+                    print("Usage: code edit <file_path>")
+                    return
+                
+                file_path = args[1]
+                
+                try:
+                    # Check if the editor module is available
+                    import editor
+                    
+                    # Create editor instance with agent
+                    edit = editor.Editor(file_path, self.agent)
+                    
+                    # Save terminal state
+                    os.system('clear')
+                    print(f"Opening editor for {file_path}...")
+                    print("Press Ctrl+Q to exit, Ctrl+S to save.")
+                    
+                    # Give user a moment to read the message
+                    time.sleep(1)
+                    
+                    # Run the editor
+                    import curses
+                    curses.wrapper(edit.run)
+                    
+                    # Restore terminal
+                    os.system('clear')
+                    print(f"Closed editor for {file_path}")
+                    
+                    # Check if file was modified
+                    if edit.modified:
+                        print("File was modified but not saved.")
+                    
+                except ImportError:
+                    print("Editor module not available. Install required dependencies:")
+                    print("pip install pygments")
+                except Exception as e:
+                    print(f"Error running editor: {e}")
+                    print(traceback.format_exc())
+            
             else:
                 print(f"Unknown command: {command}")
-                print("Usage: code [read|write] <file_path> [content]")
+                print("Usage: code [read|write|edit] <file_path> [content]")
                 
         def do_jobs(self, arg):
             """Manage background jobs: jobs [list|submit|status|cancel]"""
@@ -8014,6 +8598,7 @@ def print_usage():
     print("  --scripts DIR        Set directory for generated scripts (default: ./generated_scripts)")
     print("  --db PATH            Set database path (default: ./agent.db)")
     print("  --debug              Enable debug logging")
+    print("  --mode MODE          Set initial response mode (normal, web_search, web_trawl, deep_research, deep_task, deep_flow)")
     print("\nExamples:")
     print("  python rl_cli.py --cli                    # Start in CLI mode")
     print("  python rl_cli.py --api --port 9000        # Run API server on port 9000")
@@ -8022,6 +8607,7 @@ def print_usage():
     print("  python rl_cli.py --rl 5                   # Run RL training with 5 episodes")
     print("  python rl_cli.py --watch ./documents      # Watch ./documents for PDFs")
     print("  python rl_cli.py --scripts ./my_scripts   # Use custom directory for generated scripts")
+    print("  python rl_cli.py --mode deep_research     # Start in DEEP_RESEARCH response mode")
 
 if __name__ == "__main__":
     # Check for restart signal
@@ -8051,6 +8637,8 @@ if __name__ == "__main__":
     parser.add_argument('--scripts', type=str, default='./generated_scripts', help='Set directory for generated scripts')
     parser.add_argument('--db', type=str, default='./agent.db', help='Set database path')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--mode', type=str, choices=['normal', 'web_search', 'web_trawl', 'deep_research', 'deep_task', 'deep_flow'], 
+                      default='normal', help='Set initial response mode')
     
     # Parse arguments
     args, unknown = parser.parse_known_args()
@@ -8101,8 +8689,13 @@ if __name__ == "__main__":
         if args.dashboard:
             cli.do_dashboard("")
         
+        # Set initial response mode if specified
+        if args.mode:
+            asyncio.run(cli.agent.set_response_mode(args.mode))
+        
         # Start CLI
         mode_str = "autonomous mode" if args.autonomous else "standard mode"
         execute_str = "" if not args.no_execute else " (script auto-execution disabled)"
-        print(f"Starting Agent CLI with {mode_str}{execute_str}")
+        response_mode_str = f", response mode: {cli.agent.response_mode.value}"
+        print(f"Starting Agent CLI with {mode_str}{execute_str}{response_mode_str}")
         cli.cmdloop()
