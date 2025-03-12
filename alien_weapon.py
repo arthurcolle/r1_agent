@@ -30,14 +30,115 @@ import requests
 import random
 import numpy as np
 import tiktoken
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Literal, TypeVar, Generic
-from pydantic import BaseModel, Field, validator, root_validator
+import platform
+import hashlib
+import asyncio
+import shutil
+import ast
+import types
+import sqlite3
+import urllib.parse
+import importlib
+import importlib.util
+import difflib
+import inspect
+import importlib.machinery
+from pathlib import Path
+from math import log
+from scipy import spatial
+from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Literal, TypeVar, Generic, AsyncGenerator
+from pydantic import BaseModel, Field, validator, root_validator, ConfigDict, create_model
 from concurrent.futures import ThreadPoolExecutor, Future
 from enum import Enum, auto
 from typing_extensions import Annotated
-from pydantic import BaseModel, Field, create_model, ConfigDict
 from together import Together
-from datetime import datetime
+from datetime import datetime, timedelta
+import networkx as nx
+import matplotlib.pyplot as plt
+from PIL import Image
+import base64
+import io
+
+# Try importing watchdog for PDF monitoring - optional dependency
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    print("Watchdog not available. PDF monitoring features will be disabled.")
+
+# Try importing PyPDF2 for PDF processing - optional dependency
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+    print("PyPDF2 not available. PDF processing features will be disabled.")
+
+# Try importing OpenAI for embeddings - optional dependency
+try:
+    from openai import AsyncOpenAI
+    OPENAI_AVAILABLE = True
+    openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY", "OPENAI_API_KEY"))
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("OpenAI SDK not available. Embedding features will use alternative methods.")
+
+# Try importing torch for RL agents and vision models - optional dependency
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("PyTorch not available. RL agent and vision model features will be disabled.")
+    
+# Try importing vision models - optional dependency
+try:
+    from transformers import AutoModelForCausalLM, CLIPVisionModel, CLIPImageProcessor
+    VISION_MODELS_AVAILABLE = True
+except ImportError:
+    VISION_MODELS_AVAILABLE = False
+    print("Vision models not available. Install with: pip install transformers torch einops pillow.")
+
+# Try importing FastAPI for API endpoints - optional dependency
+try:
+    from fastapi import FastAPI, Request, BackgroundTasks
+    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.templating import Jinja2Templates
+    import uvicorn
+    FASTAPI_AVAILABLE = True
+except ImportError:
+    FASTAPI_AVAILABLE = False
+    print("FastAPI not available. API endpoint features will be disabled.")
+
+# Try importing redis for distributed cache - optional dependency
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    print("Redis client not available. Distributed cache features will be disabled.")
+
+# Try importing gymnasium for RL environments - optional dependency
+try:
+    import gymnasium as gym
+    GYM_AVAILABLE = True
+except ImportError:
+    GYM_AVAILABLE = False
+    print("Gymnasium not available. RL environment features will be disabled.")
+
+# Try importing curses for terminal UI - optional dependency
+try:
+    import curses
+    from curses import panel
+    CURSES_AVAILABLE = True
+except ImportError:
+    CURSES_AVAILABLE = False
+    print("Curses not available. Advanced terminal UI features will be disabled.")
 
 ###############################################################################
 # GLOBAL CONFIG / LOGGING
@@ -49,6 +150,2642 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("UltraAdvancedR1Agent")
+
+###############################################################################
+# TERMINAL UI COLORS
+###############################################################################
+
+class Colors:
+    """ANSI color codes for logging and debugging."""
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+###############################################################################
+# SYSTEM CAPABILITIES DETECTION
+###############################################################################
+
+def detect_system_capabilities() -> Dict[str, Any]:
+    """Detect system capabilities and available tools"""
+    capabilities = {
+        "os": platform.system(),
+        "python_version": platform.python_version(),
+        "env_vars": {},
+        "commands": {},
+        "apis": {}
+    }
+    
+    # Detect environment variables for APIs
+    api_patterns = ['API_KEY', 'ACCESS_TOKEN', 'SECRET_KEY', 'TOKEN']
+    for key, value in os.environ.items():
+        if any(pattern in key.upper() for pattern in api_patterns):
+            service = key.split('_')[0].lower()
+            capabilities["env_vars"][service] = key
+
+    # Detect common command line tools
+    common_commands = ['git', 'curl', 'wget', 'ffmpeg', 'pandoc']
+    for cmd in common_commands:
+        try:
+            subprocess.run([cmd, '--version'], capture_output=True)
+            capabilities["commands"][cmd] = True
+        except FileNotFoundError:
+            capabilities["commands"][cmd] = False
+
+    # Add available Python modules
+    capabilities["python_modules"] = {
+        "watchdog": WATCHDOG_AVAILABLE,
+        "pypdf2": PYPDF2_AVAILABLE,
+        "openai": OPENAI_AVAILABLE,
+        "torch": TORCH_AVAILABLE,
+        "fastapi": FASTAPI_AVAILABLE,
+        "redis": REDIS_AVAILABLE,
+        "gymnasium": GYM_AVAILABLE,
+        "curses": CURSES_AVAILABLE,
+        "vision_models": VISION_MODELS_AVAILABLE
+    }
+    
+    return capabilities
+
+###############################################################################
+# PDF HANDLING AND MONITORING
+###############################################################################
+
+class PDFHandler(FileSystemEventHandler):
+    """Handler for PDF file events"""
+    def __init__(self, agent):
+        self.agent = agent
+        self.processed_paths = set()
+        
+    def compute_file_hash(self, file_path):
+        hasher = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+        
+    def should_process_file(self, file_path):
+        if file_path in self.processed_paths:
+            return False
+        cur = self.agent.knowledge_base.conn.cursor()
+        cur.execute("SELECT file_hash, last_modified FROM ingested_files WHERE file_path = ?", (file_path,))
+        row = cur.fetchone()
+        if not row:
+            return True
+        current_hash = self.compute_file_hash(file_path)
+        current_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+        return (current_hash != row[0] or current_mtime.timestamp() > datetime.fromisoformat(row[1]).timestamp())
+        
+    def record_processed_file(self, file_path):
+        c_hash = self.compute_file_hash(file_path)
+        c_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+        cur = self.agent.knowledge_base.conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO ingested_files (file_path, file_hash, last_modified, ingested_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        """, (file_path, c_hash, c_mtime.isoformat()))
+        self.agent.knowledge_base.conn.commit()
+        self.processed_paths.add(file_path)
+        
+    def on_created(self, event):
+        if event.is_directory:
+            logging.info(f"New directory detected: {event.src_path}")
+            for root, _, files in os.walk(event.src_path):
+                for fl in files:
+                    if fl.lower().endswith(".pdf"):
+                        fp = os.path.join(root, fl)
+                        self.process_pdf(fp)
+            return
+        if event.src_path.lower().endswith(".pdf"):
+            self.process_pdf(event.src_path)
+            
+    def process_pdf(self, file_path):
+        if self.should_process_file(file_path):
+            logging.info(f"Processing PDF: {file_path}")
+            asyncio.run(self.agent.ingest_source(file_path))
+            self.record_processed_file(file_path)
+        else:
+            logging.info(f"Skipping already processed PDF: {file_path}")
+
+###############################################################################
+# EXTERNAL API CLIENTS
+###############################################################################
+
+class JinaClient:
+    """Client for interacting with Jina.ai endpoints"""
+    
+    def __init__(self, token: Optional[str] = None):
+        """Initialize with your Jina token"""
+        self.token = token or os.getenv("JINA_API_KEY", "JINA_API_KEY")
+        self.headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+    
+    async def search(self, query: str) -> dict:
+        """Search using s.jina.ai endpoint"""
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://s.jina.ai/{encoded_query}"
+        response = requests.get(url, headers=self.headers)
+        return response.json()
+    
+    async def fact_check(self, query: str) -> dict:
+        """Get grounding info using g.jina.ai endpoint"""
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://g.jina.ai/{encoded_query}"
+        response = requests.get(url, headers=self.headers)
+        return response.json()
+        
+    async def reader(self, url: str) -> dict:
+        """Get ranking using r.jina.ai endpoint"""
+        encoded_url = urllib.parse.quote(url)
+        url = f"https://r.jina.ai/{encoded_url}"
+        response = requests.get(url, headers=self.headers)
+        return response.json()
+        
+###############################################################################
+# VISION MODEL
+###############################################################################
+
+class VisionModel:
+    """
+    Manages vision model capabilities for image understanding and processing.
+    Supports both local models and API-based vision services.
+    """
+    
+    def __init__(self, model_name: str = "vikhyatk/moondream2", 
+                 revision: str = "2025-01-09",
+                 device: str = "cpu"):
+        """
+        Initialize the vision model with specified options.
+        
+        Args:
+            model_name: The model identifier/name to use
+            revision: Model revision/version
+            device: Device to run the model on ('cpu', 'cuda', etc.)
+        """
+        self.model_name = model_name
+        self.revision = revision
+        self.device = device
+        self._model = None
+        self._processor = None
+        self._clip_model = None
+        self._clip_processor = None
+        self.logger = logging.getLogger("VisionModel")
+        
+        # Only attempt to load models if vision libraries are available
+        if VISION_MODELS_AVAILABLE and TORCH_AVAILABLE:
+            self._initialize_models()
+        else:
+            self.logger.warning("Vision model capabilities unavailable. Install required packages to enable.")
+    
+    def _initialize_models(self):
+        """Initialize vision models on demand to save resources"""
+        try:
+            self.logger.info(f"Initializing vision model: {self.model_name}")
+            
+            # Initialize CLIP model and processor for image encoding
+            self._clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            self._clip_model = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
+            
+            # Initialize main vision language model
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                revision=self.revision,
+                trust_remote_code=True,
+                device_map={"": self.device}
+            )
+            
+            self.logger.info("Vision models initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize vision models: {str(e)}")
+            self._model = None
+            self._clip_model = None
+    
+    def ensure_models_loaded(self):
+        """Ensure that models are loaded before use"""
+        if not VISION_MODELS_AVAILABLE or not TORCH_AVAILABLE:
+            raise RuntimeError("Vision capabilities unavailable. Please install required packages.")
+        
+        if self._model is None or self._clip_model is None:
+            self._initialize_models()
+            
+        if self._model is None or self._clip_model is None:
+            raise RuntimeError("Failed to initialize vision models")
+    
+    def encode_image(self, image_path: Union[str, Path, Image.Image]) -> Dict[str, Any]:
+        """
+        Encode an image for use with vision models.
+        
+        Args:
+            image_path: Path to image file or PIL Image object
+            
+        Returns:
+            Dictionary with encoded image data
+        """
+        self.ensure_models_loaded()
+        
+        # Handle different input types
+        if isinstance(image_path, (str, Path)):
+            image = Image.open(image_path).convert('RGB')
+        elif isinstance(image_path, Image.Image):
+            image = image_path.convert('RGB')
+        else:
+            raise ValueError("image_path must be a string, Path, or PIL Image")
+        
+        # Use model's native encode_image if available
+        if hasattr(self._model, 'encode_image'):
+            encoded = self._model.encode_image(image)
+            return {"encoded_image": encoded, "model": "native"}
+        
+        # Fallback to CLIP encoding
+        with torch.no_grad():
+            inputs = self._clip_processor(images=image, return_tensors="pt").to(self.device)
+            outputs = self._clip_model(**inputs)
+            embeddings = outputs.last_hidden_state
+            
+            return {
+                "encoded_image": embeddings, 
+                "inputs": inputs,
+                "model": "clip"
+            }
+    
+    def caption_image(self, encoded_image: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate a caption for an encoded image.
+        
+        Args:
+            encoded_image: Encoded image from encode_image()
+            
+        Returns:
+            Dictionary with caption and metadata
+        """
+        self.ensure_models_loaded()
+        
+        try:
+            if hasattr(self._model, 'caption'):
+                # Direct caption if model supports it
+                result = self._model.caption(encoded_image["encoded_image"])
+                return {
+                    "caption": result.get("caption", result), 
+                    "model": self.model_name
+                }
+            else:
+                # Fallback to query with generic caption prompt
+                return self.query_image(
+                    encoded_image, 
+                    "Describe this image in detail."
+                )
+        except Exception as e:
+            self.logger.error(f"Caption generation failed: {str(e)}")
+            return {"error": str(e), "caption": "Failed to generate caption"}
+    
+    def query_image(self, encoded_image: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """
+        Ask a question about an encoded image.
+        
+        Args:
+            encoded_image: Encoded image from encode_image()
+            query: Question to ask about the image
+            
+        Returns:
+            Dictionary with answer and metadata
+        """
+        self.ensure_models_loaded()
+        
+        try:
+            if hasattr(self._model, 'query'):
+                # Direct query if model supports it
+                result = self._model.query(encoded_image["encoded_image"], query)
+                return {
+                    "answer": result.get("answer", result),
+                    "query": query,
+                    "model": self.model_name
+                }
+            else:
+                # Generic generation approach as fallback
+                return {
+                    "answer": "Model does not support direct image queries",
+                    "query": query,
+                    "model": self.model_name
+                }
+        except Exception as e:
+            self.logger.error(f"Image query failed: {str(e)}")
+            return {"error": str(e), "answer": "Failed to process image query"}
+    
+    @staticmethod
+    def image_to_base64(image_path: Union[str, Path, Image.Image]) -> str:
+        """
+        Convert an image to base64 encoding for API requests.
+        
+        Args:
+            image_path: Path to image file or PIL Image object
+            
+        Returns:
+            Base64 encoded image string
+        """
+        # Handle different input types
+        if isinstance(image_path, (str, Path)):
+            image = Image.open(image_path)
+        elif isinstance(image_path, Image.Image):
+            image = image_path
+        else:
+            raise ValueError("image_path must be a string, Path, or PIL Image")
+            
+        # Convert to JPEG in memory
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        
+        # Get the bytes and encode to base64
+        img_bytes = buffer.getvalue()
+        base64_encoded = base64.b64encode(img_bytes).decode('utf-8')
+        
+        return base64_encoded
+        
+    async def external_vision_api(self, image_path: Union[str, Path, Image.Image], 
+                                 query: Optional[str] = None, 
+                                 provider: str = "openai") -> Dict[str, Any]:
+        """
+        Process an image using external vision API providers.
+        
+        Args:
+            image_path: Path to image file or PIL Image object
+            query: Optional question to ask about the image
+            provider: API provider to use ('openai', 'anthropic', etc.)
+            
+        Returns:
+            Provider-specific response
+        """
+        # Convert image to base64
+        base64_image = self.image_to_base64(image_path)
+        
+        if provider == "openai" and OPENAI_AVAILABLE:
+            # OpenAI vision API
+            try:
+                client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": query or "Describe this image in detail."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                        ]
+                    }
+                ]
+                
+                response = await client.chat.completions.create(
+                    model="gpt-4-vision-preview",
+                    messages=messages,
+                    max_tokens=1000
+                )
+                
+                return {
+                    "provider": "openai",
+                    "model": "gpt-4-vision-preview",
+                    "response": response.choices[0].message.content,
+                    "query": query
+                }
+            
+            except Exception as e:
+                self.logger.error(f"OpenAI vision API error: {str(e)}")
+                return {"error": str(e), "provider": "openai"}
+                
+        elif provider == "anthropic" and "ANTHROPIC_API_KEY" in os.environ:
+            # Anthropic Claude vision API
+            try:
+                headers = {
+                    "x-api-key": os.environ.get("ANTHROPIC_API_KEY"),
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                }
+                
+                data = {
+                    "model": "claude-3-opus-20240229",
+                    "max_tokens": 1000,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": query or "Describe this image in detail."},
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64_image}}
+                            ]
+                        }
+                    ]
+                }
+                
+                response = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers=headers,
+                    json=data
+                )
+                
+                return {
+                    "provider": "anthropic",
+                    "model": "claude-3-opus-20240229",
+                    "response": response.json().get("content", [{"text": "No response"}])[0].get("text"),
+                    "query": query
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Anthropic vision API error: {str(e)}")
+                return {"error": str(e), "provider": "anthropic"}
+                
+        else:
+            return {"error": f"Provider {provider} not available or API key not configured"}
+
+###############################################################################
+# DYNAMIC TOOL REGISTRATION
+###############################################################################
+
+tools: List[Dict[str, Any]] = []
+available_functions: Dict[str, Callable] = {}
+
+def register_tool(
+    name: str, 
+    func: Callable, 
+    description: str, 
+    parameters: Dict[str, Any],
+    required_params: Optional[List[str]] = None,
+    examples: Optional[List[Dict[str, Any]]] = None,
+    rate_limit: Optional[float] = None
+):
+    """
+    Register a tool function for dynamic function calling with enhanced metadata.
+    
+    Args:
+        name: Tool name
+        func: The callable to execute
+        description: Tool description
+        parameters: Parameter schema
+        required_params: List of required parameter names
+        examples: List of example calls with inputs and outputs
+        rate_limit: Minimum seconds between calls
+    """
+    global tools
+    tools[:] = [t for t in tools if t["function"]["name"] != name]
+    available_functions[name] = func
+    
+    tool_spec = {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": parameters,
+                "required": required_params or list(parameters.keys())
+            }
+        },
+        "metadata": {
+            "registered_at": datetime.now().isoformat(),
+            "examples": examples or [],
+            "rate_limit": rate_limit,
+            "last_called": None
+        }
+    }
+    
+    tools.append(tool_spec)
+    logger.info(f"{Colors.OKGREEN}{Colors.BOLD}Registered tool:{Colors.ENDC} {name}")
+    return tool_spec
+
+def call_tool(function_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Call a registered tool with given arguments and return structured response."""
+    func = available_functions.get(function_name)
+    if not func:
+        return {
+            "status": "error",
+            "error": f"Tool {function_name} not found",
+            "result": None
+        }
+    try:
+        result = func(**args)
+        return {
+            "status": "success",
+            "error": None,
+            "result": result,
+            "function_name": function_name,
+            "args": args,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "result": None,
+            "function_name": function_name,
+            "args": args,
+            "timestamp": datetime.now().isoformat()
+        }
+
+def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
+    """Create tool functions based on detected capabilities"""
+    tools = {}
+
+    # File operations
+    tools["read_file"] = lambda path: Path(path).read_text() if Path(path).exists() else None
+    tools["write_file"] = lambda path, content: Path(path).write_text(content)
+    tools["list_files"] = lambda path=".", pattern="*": list(Path(path).glob(pattern))
+    
+    # Command execution
+    tools["run_command"] = lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    
+    # Web operations if requests is available
+    if "requests" in sys.modules:
+        tools["web_get"] = lambda url: requests.get(url).text
+        
+        # Jina.ai integration
+        if "JINA_API_KEY" in os.environ:
+            jina_client = JinaClient()
+            tools["jina_search"] = jina_client.search
+            tools["jina_fact_check"] = jina_client.fact_check
+            tools["jina_reader"] = jina_client.reader
+            
+            # Register tool schemas
+            register_tool(
+                "jina_search",
+                jina_client.search,
+                "Search the web using Jina.ai",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    }
+                }
+            )
+            
+            register_tool(
+                "jina_fact_check",
+                jina_client.fact_check,
+                "Fact check a statement using Jina.ai",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "Statement to fact check"
+                    }
+                }
+            )
+            
+            register_tool(
+                "jina_reader",
+                jina_client.reader,
+                "Extract content from a URL using Jina.ai",
+                {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to analyze"
+                    }
+                }
+            )
+    
+        # Vision model integration
+        if capabilities["python_modules"].get("vision_models", False) and capabilities["python_modules"].get("torch", False):
+            # Initialize vision model
+            vision_model = VisionModel(device="cuda" if torch.cuda.is_available() else "cpu")
+            
+            # Register vision tools
+            async def analyze_image(image_path: str, query: Optional[str] = None) -> Dict[str, Any]:
+                """Analyze an image using local vision model"""
+                try:
+                    # Encode the image
+                    encoded_image = vision_model.encode_image(image_path)
+                    
+                    # Generate caption
+                    caption_result = vision_model.caption_image(encoded_image)
+                    
+                    # If a specific query is provided, answer it
+                    if query:
+                        query_result = vision_model.query_image(encoded_image, query)
+                        result = {
+                            "caption": caption_result.get("caption", "No caption generated"),
+                            "answer": query_result.get("answer", "No answer generated"),
+                            "query": query,
+                            "model": vision_model.model_name
+                        }
+                    else:
+                        result = {
+                            "caption": caption_result.get("caption", "No caption generated"),
+                            "model": vision_model.model_name
+                        }
+                    
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"Image analysis error: {str(e)}")
+                    return {"error": str(e)}
+            
+            tools["analyze_image"] = analyze_image
+            
+            # Register image captioning
+            async def caption_image(image_path: str) -> Dict[str, Any]:
+                """Generate a caption for an image"""
+                try:
+                    encoded_image = vision_model.encode_image(image_path)
+                    caption_result = vision_model.caption_image(encoded_image)
+                    return {
+                        "caption": caption_result.get("caption", "No caption generated"),
+                        "model": vision_model.model_name
+                    }
+                except Exception as e:
+                    logger.error(f"Image captioning error: {str(e)}")
+                    return {"error": str(e)}
+                    
+            tools["caption_image"] = caption_image
+            
+            # Register visual QA
+            async def visual_qa(image_path: str, question: str) -> Dict[str, Any]:
+                """Ask a question about an image"""
+                try:
+                    encoded_image = vision_model.encode_image(image_path)
+                    answer_result = vision_model.query_image(encoded_image, question)
+                    return {
+                        "answer": answer_result.get("answer", "No answer generated"),
+                        "question": question,
+                        "model": vision_model.model_name
+                    }
+                except Exception as e:
+                    logger.error(f"Visual QA error: {str(e)}")
+                    return {"error": str(e)}
+                    
+            tools["visual_qa"] = visual_qa
+            
+            # Register cloud vision API
+            async def cloud_vision(image_path: str, query: Optional[str] = None, provider: str = "openai") -> Dict[str, Any]:
+                """Process an image using cloud vision API"""
+                try:
+                    result = await vision_model.external_vision_api(image_path, query, provider)
+                    return result
+                except Exception as e:
+                    logger.error(f"Cloud vision API error: {str(e)}")
+                    return {"error": str(e)}
+                    
+            tools["cloud_vision"] = cloud_vision
+            
+            # Register the tool schemas
+            register_tool(
+                "analyze_image",
+                analyze_image,
+                "Analyze an image using local vision model",
+                {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Path to the image file"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional question to ask about the image"
+                    }
+                },
+                required_params=["image_path"]
+            )
+            
+            register_tool(
+                "caption_image",
+                caption_image,
+                "Generate a caption for an image",
+                {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Path to the image file"
+                    }
+                }
+            )
+            
+            register_tool(
+                "visual_qa",
+                visual_qa,
+                "Ask a question about an image",
+                {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Path to the image file"
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Question to ask about the image"
+                    }
+                }
+            )
+            
+            register_tool(
+                "cloud_vision",
+                cloud_vision,
+                "Process an image using cloud vision API",
+                {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Path to the image file"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional question to ask about the image"
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "API provider to use ('openai', 'anthropic')",
+                        "enum": ["openai", "anthropic"]
+                    }
+                },
+                required_params=["image_path"]
+            )
+            
+        # Dynamic code loading tools
+        # Initialize dynamic code loader
+        dynamic_code_loader = DynamicCodeLoader()
+        
+        # Function to load a module dynamically
+        async def load_module(module_path: str, reload: bool = False) -> Dict[str, Any]:
+            """
+            Load a Python module dynamically from file path.
+            
+            Args:
+                module_path: Path to the Python module file
+                reload: Force reload even if previously loaded
+                
+            Returns:
+                Information about the loaded module
+            """
+            try:
+                module = dynamic_code_loader.load_module(module_path, reload=reload)
+                
+                # Get module symbols
+                symbols = dynamic_code_loader.get_module_symbols(module_path)
+                
+                return {
+                    "module_path": str(module_path),
+                    "module_name": module.__name__,
+                    "symbols": symbols,
+                    "status": "success",
+                    "reloaded": reload
+                }
+            except Exception as e:
+                logger.error(f"Failed to load module {module_path}: {str(e)}")
+                return {
+                    "module_path": str(module_path),
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        # Function to execute a function from a dynamically loaded module
+        async def execute_from_module(module_path: str, function_name: str, args: List[Any] = None, kwargs: Dict[str, Any] = None) -> Dict[str, Any]:
+            """
+            Execute a function from a dynamically loaded module.
+            
+            Args:
+                module_path: Path to the Python module file
+                function_name: Name of the function to execute
+                args: Positional arguments to pass to the function
+                kwargs: Keyword arguments to pass to the function
+                
+            Returns:
+                Results of the function execution
+            """
+            try:
+                args = args or []
+                kwargs = kwargs or {}
+                
+                result = dynamic_code_loader.execute_function(module_path, function_name, *args, **kwargs)
+                
+                return {
+                    "module_path": str(module_path),
+                    "function_name": function_name,
+                    "status": "success",
+                    "result": result,
+                    "args": args,
+                    "kwargs": kwargs
+                }
+            except Exception as e:
+                logger.error(f"Failed to execute {function_name} from module {module_path}: {str(e)}")
+                return {
+                    "module_path": str(module_path),
+                    "function_name": function_name,
+                    "status": "error",
+                    "error": str(e),
+                    "args": args,
+                    "kwargs": kwargs
+                }
+        
+        # Function to check for modified modules
+        async def check_for_module_changes() -> Dict[str, Any]:
+            """
+            Check all loaded modules for changes since they were last loaded.
+            
+            Returns:
+                Information about which modules have changed
+            """
+            try:
+                changed_modules = dynamic_code_loader.check_for_changes()
+                
+                return {
+                    "changed_modules": [str(path) for path in changed_modules],
+                    "count": len(changed_modules),
+                    "status": "success"
+                }
+            except Exception as e:
+                logger.error(f"Failed to check for module changes: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        # Function to reload all changed modules
+        async def reload_changed_modules() -> Dict[str, Any]:
+            """
+            Reload all modules that have changed since they were last loaded.
+            
+            Returns:
+                Information about which modules were reloaded
+            """
+            try:
+                results = dynamic_code_loader.reload_all_changed()
+                
+                return {
+                    "reloaded_modules": {str(k): v for k, v in results.items()},
+                    "count": len(results),
+                    "status": "success"
+                }
+            except Exception as e:
+                logger.error(f"Failed to reload changed modules: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": str(e)
+                }
+                
+        # Register the dynamic code loading tools
+        tools["load_module"] = load_module
+        tools["execute_from_module"] = execute_from_module
+        tools["check_for_module_changes"] = check_for_module_changes
+        tools["reload_changed_modules"] = reload_changed_modules
+        
+        # Register tool schemas
+        register_tool(
+            "load_module",
+            load_module,
+            "Load a Python module dynamically from file path",
+            {
+                "module_path": {
+                    "type": "string",
+                    "description": "Path to the Python module file"
+                },
+                "reload": {
+                    "type": "boolean",
+                    "description": "Force reload even if previously loaded"
+                }
+            },
+            required_params=["module_path"]
+        )
+        
+        register_tool(
+            "execute_from_module",
+            execute_from_module,
+            "Execute a function from a dynamically loaded module",
+            {
+                "module_path": {
+                    "type": "string",
+                    "description": "Path to the Python module file"
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": "Name of the function to execute"
+                },
+                "args": {
+                    "type": "array",
+                    "description": "Positional arguments to pass to the function",
+                    "items": {
+                        "type": "object"
+                    }
+                },
+                "kwargs": {
+                    "type": "object",
+                    "description": "Keyword arguments to pass to the function"
+                }
+            },
+            required_params=["module_path", "function_name"]
+        )
+        
+        register_tool(
+            "check_for_module_changes",
+            check_for_module_changes,
+            "Check all loaded modules for changes since they were last loaded",
+            {}
+        )
+        
+        register_tool(
+            "reload_changed_modules",
+            reload_changed_modules,
+            "Reload all modules that have changed since they were last loaded",
+            {}
+        )
+    
+        # Weather API integration
+        if "OPENWEATHERMAP_API_KEY" in os.environ:
+            async def get_weather(location: str) -> Dict[str, Any]:
+                """Get weather data for a location using Jina search as fallback if OpenWeather fails"""
+                try:
+                    api_key = os.environ.get("OPENWEATHERMAP_API_KEY")
+                    if api_key:
+                        # Use a session for connection pooling and better performance
+                        session = requests.Session()
+                        url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={api_key}&units=imperial"
+                        
+                        # Set a timeout to prevent hanging
+                        response = session.get(url, timeout=5.0)
+                        if response.status_code == 200:
+                            return response.json()
+                        elif response.status_code == 404:
+                            # Location not found, try with less specific query
+                            main_city = location.split()[0] if ' ' in location else location
+                            url = f"http://api.openweathermap.org/data/2.5/weather?q={main_city}&appid={api_key}&units=imperial"
+                            response = session.get(url, timeout=5.0)
+                            if response.status_code == 200:
+                                return response.json()
+    
+                    # Fallback to Jina search
+                    jina_client = JinaClient()
+                    search_result = await jina_client.search(f"current weather in {location}")
+                    return {
+                        "main": {"temp": "N/A"},
+                        "weather": [{"description": search_result.get("weather_description", "Weather data unavailable")}],
+                        "jina_results": search_result
+                    }
+                except requests.exceptions.Timeout:
+                    return {"error": f"Weather API timeout for location: {location}"}
+                except requests.exceptions.RequestException as e:
+                    return {"error": f"Weather API request error: {str(e)}"}
+                except Exception as e:
+                    return {"error": f"Weather API error: {str(e)}"}
+            tools["get_weather"] = get_weather
+
+        # Search implementations
+        if "serpapi" in capabilities["env_vars"] or "SERPAPI_API_KEY" in os.environ:
+            try:
+                from serpapi import GoogleSearch
+                async def web_search(query: str) -> Dict[str, Any]:
+                    try:
+                        api_key = os.getenv("SERPAPI_API_KEY")
+                        search = GoogleSearch({
+                            "q": query,
+                            "api_key": api_key
+                        })
+                        return search.get_dict()
+                    except Exception as e:
+                        logger.error(f"SerpAPI search error: {e}")
+                        return {"error": f"Search error: {str(e)}"}
+                tools["web_search"] = web_search
+                logger.info("SerpAPI search tool registered")
+            except ImportError:
+                logger.warning("SerpAPI package not installed. To use SerpAPI search, install with: pip install google-search-results")
+                
+        elif "GOOGLE_API_KEY" in os.environ and "GOOGLE_CSE_ID" in os.environ:
+            async def web_search(query: str) -> Dict[str, Any]:
+                try:
+                    url = "https://www.googleapis.com/customsearch/v1"
+                    params = {
+                        "key": os.environ["GOOGLE_API_KEY"],
+                        "cx": os.environ["GOOGLE_CSE_ID"],
+                        "q": query
+                    }
+                    # Set timeout to prevent hanging
+                    response = requests.get(url, params=params, timeout=10.0)
+                    if response.status_code == 200:
+                        return response.json()
+                    return {"error": f"Google search error: {response.status_code}"}
+                except requests.exceptions.Timeout:
+                    return {"error": "Google search timeout"}
+                except Exception as e:
+                    logger.error(f"Google search error: {e}")
+                    return {"error": f"Search error: {str(e)}"}
+            tools["web_search"] = web_search
+            logger.info("Google Custom Search tool registered")
+            
+            # Register tool schema
+            register_tool(
+                "web_search",
+                web_search,
+                "Search the web using Google Custom Search",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    }
+                }
+            )
+
+    return tools
+
+###############################################################################
+# SQLITE KNOWLEDGE BASE
+###############################################################################
+
+class SQLiteKnowledgeBase:
+    """
+    A SQLite-based knowledge base for collections, documents, and embeddings.
+    """
+    def __init__(self, db_path: str = "./agent.db"):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        self._create_tables()
+
+    def _create_tables(self):
+        cur = self.conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("SELECT MAX(version) FROM schema_version")
+        current_version = cur.fetchone()[0] or 0
+        if current_version < 1:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS collections (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS documents (
+                    id TEXT PRIMARY KEY,
+                    collection_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_updated DATETIME,
+                    version INTEGER DEFAULT 1,
+                    status TEXT DEFAULT 'active',
+                    tags TEXT,
+                    FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings_cache (
+                    content_hash TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("INSERT INTO schema_version (version) VALUES (1)")
+        if current_version < 2:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ingested_files (
+                    file_path TEXT PRIMARY KEY,
+                    file_hash TEXT NOT NULL,
+                    last_modified DATETIME NOT NULL,
+                    ingested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'completed'
+                )
+            """)
+            cur.execute("INSERT INTO schema_version (version) VALUES (2)")
+        if current_version < 3:
+            # Add versioning and history tables
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS document_history (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    changed_at DATETIME NOT NULL,
+                    change_type TEXT NOT NULL,
+                    change_metadata TEXT,
+                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS document_diffs (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    diff TEXT NOT NULL,
+                    applied_at DATETIME NOT NULL,
+                    compressed INTEGER DEFAULT 0,
+                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+                )
+            """)
+            # Add conflict tracking
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS code_conflicts (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    base_content TEXT NOT NULL,
+                    our_content TEXT NOT NULL,
+                    their_content TEXT NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    resolved_at DATETIME,
+                    resolution_type TEXT,
+                    resolved_by TEXT,
+                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+                )
+            """)
+            # Add real-time sync status tracking
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sync_operations (
+                    id TEXT PRIMARY KEY,
+                    started_at DATETIME NOT NULL,
+                    completed_at DATETIME,
+                    status TEXT DEFAULT 'pending',
+                    error_message TEXT,
+                    document_ids TEXT,
+                    agent_id TEXT,
+                    metadata TEXT
+                )
+            """)
+            # Add database synchronization locks
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS db_locks (
+                    resource_id TEXT PRIMARY KEY,
+                    lock_holder TEXT NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    expires_at DATETIME,
+                    metadata TEXT
+                )
+            """)
+            # Add distributed change notification tracking
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS change_notifications (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    notification_type TEXT NOT NULL,
+                    sent_at DATETIME NOT NULL,
+                    recipients TEXT,
+                    acknowledgements TEXT,
+                    metadata TEXT,
+                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+                )
+            """)
+            # Create indices for performance
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_document_history_document_id ON document_history(document_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_document_history_changed_at ON document_history(changed_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_document_diffs_document_id ON document_diffs(document_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_collection_id ON documents(collection_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_code_conflicts_document_id ON code_conflicts(document_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sync_operations_status ON sync_operations(status)")
+            
+            # Add transaction functions
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS db_transactions (
+                    id TEXT PRIMARY KEY,
+                    started_at DATETIME NOT NULL,
+                    completed_at DATETIME,
+                    status TEXT DEFAULT 'running',
+                    operation_type TEXT NOT NULL,
+                    affected_resources TEXT,
+                    metadata TEXT
+                )
+            """)
+            
+            # Add full-text search capability
+            cur.execute("CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(title, content, document_id UNINDEXED)")
+            
+            # Update schema version
+            cur.execute("INSERT INTO schema_version (version) VALUES (3)")
+            
+        self.conn.commit()
+        
+        # Initialize foreign key enforcement
+        cur.execute("PRAGMA foreign_keys = ON")
+
+    def create_collection(self, name: str, description: str = None) -> str:
+        collection_id = str(uuid.uuid4())
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO collections (id, name, description)
+            VALUES (?, ?, ?)
+        """, (collection_id, name, description))
+        self.conn.commit()
+        logger.info(f"Created collection '{name}' with id {collection_id}")
+        return collection_id
+
+    async def add_knowledge_entry(self, kb_id: str, title: str, content: str, embedding: List[float] = None) -> str:
+        doc_id = str(uuid.uuid4())
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO documents (id, collection_id, title, content)
+            VALUES (?, ?, ?, ?)
+        """, (doc_id, kb_id, title, content))
+        
+        # If embedding not provided, compute it
+        if embedding is None and len(content) > 0:
+            embedding = await compute_embedding(content, db_conn=self.conn)
+            
+        # Add to full-text search index
+        cur.execute("""
+            INSERT INTO document_fts (document_id, title, content)
+            VALUES (?, ?, ?)
+        """, (doc_id, title, content))
+        
+        self.conn.commit()
+        logger.info(f"Added knowledge entry {doc_id} titled '{title}' to collection {kb_id}")
+        return doc_id
+
+    async def search_knowledge(self, query: str, kb_id: Optional[str] = None, top_n: int = 3) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant documents from the knowledge base.
+        
+        Args:
+            query: Search query text
+            kb_id: Optional collection ID to search within
+            top_n: Maximum number of results to return (default: 3)
+            
+        Returns:
+            List of matching documents sorted by relevance
+        """
+        cur = self.conn.cursor()
+        
+        # Try full-text search first
+        fts_results = []
+        try:
+            if kb_id:
+                cur.execute("""
+                    SELECT d.*, fts.rank
+                    FROM document_fts fts
+                    JOIN documents d ON fts.document_id = d.id
+                    WHERE d.collection_id = ? AND document_fts MATCH ?
+                    ORDER BY fts.rank
+                    LIMIT ?
+                """, (kb_id, query, top_n))
+            else:
+                cur.execute("""
+                    SELECT d.*, fts.rank
+                    FROM document_fts fts
+                    JOIN documents d ON fts.document_id = d.id
+                    WHERE document_fts MATCH ?
+                    ORDER BY fts.rank
+                    LIMIT ?
+                """, (query, top_n))
+            
+            fts_results = [dict(row) for row in cur.fetchall()]
+            
+            # If we got good results from FTS, return them
+            if len(fts_results) >= top_n // 2:
+                return fts_results
+        except Exception as e:
+            logger.warning(f"Full-text search failed, falling back to vector search: {e}")
+        
+        # Fall back to vector search
+        if kb_id:
+            cur.execute("SELECT * FROM documents WHERE collection_id = ?", (kb_id,))
+        else:
+            cur.execute("SELECT * FROM documents")
+        rows = cur.fetchall()
+        if not rows:
+            return fts_results  # Return any FTS results we got, or empty list
+            
+        # Get query embedding
+        query_emb = await compute_embedding(query, db_conn=self.conn)
+        if not query_emb:
+            return fts_results  # Return any FTS results we got, or empty list
+            
+        query_vec = np.array(query_emb)
+        scored = []
+        
+        # Calculate similarity for each document
+        for row in rows:
+            content = row["content"]
+            doc_emb = await compute_embedding(content, db_conn=self.conn)
+            if doc_emb:
+                similarity = 1 - spatial.distance.cosine(query_vec, np.array(doc_emb))
+                row_dict = dict(row)
+                row_dict["similarity"] = similarity
+                scored.append(row_dict)
+                
+        # Sort by similarity score (highest first)
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        
+        # Combine results from FTS and vector search, removing duplicates
+        combined_results = []
+        seen_ids = set()
+        
+        # First add FTS results
+        for result in fts_results:
+            combined_results.append(result)
+            seen_ids.add(result["id"])
+            
+        # Then add vector search results, skipping duplicates
+        for result in scored[:top_n]:
+            if result["id"] not in seen_ids:
+                combined_results.append(result)
+                seen_ids.add(result["id"])
+                if len(combined_results) >= top_n:
+                    break
+                    
+        return combined_results[:top_n]
+
+###############################################################################
+# EMBEDDING COMPUTATION WITH CACHING
+###############################################################################
+
+async def compute_embeddings_batch(
+    texts: List[str],
+    model: str = "text-embedding-3-large",
+    batch_size: int = 16,
+    db_conn: Optional[sqlite3.Connection] = None
+) -> List[List[float]]:
+    """
+    Compute embeddings for a batch of texts with caching support.
+    
+    Args:
+        texts: List of text strings to embed
+        model: Name of the embedding model to use
+        batch_size: Number of texts to process in each API call
+        db_conn: Optional SQLite connection for caching
+        
+    Returns:
+        List of embedding vectors (list of floats)
+    """
+    results = []
+    uncached_texts = []
+    uncached_indices = []
+    content_hashes = []
+
+    # Check cache if DB connection provided
+    if db_conn:
+        cur = db_conn.cursor()
+        for i, text in enumerate(texts):
+            c_hash = hashlib.sha256(text.encode()).hexdigest()
+            content_hashes.append(c_hash)
+            cur.execute("SELECT embedding FROM embeddings_cache WHERE content_hash = ?", (c_hash,))
+            row = cur.fetchone()
+            if row:
+                emb_list = np.frombuffer(row[0], dtype=np.float32).tolist()
+                results.append(emb_list)
+            else:
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+    else:
+        uncached_texts = texts
+        uncached_indices = list(range(len(texts)))
+        content_hashes = [hashlib.sha256(t.encode()).hexdigest() for t in texts]
+
+    # Process any texts not found in cache
+    if uncached_texts:
+        if OPENAI_AVAILABLE:
+            # Use OpenAI API in batches
+            for i in range(0, len(uncached_texts), batch_size):
+                batch = uncached_texts[i:i+batch_size]
+                try:
+                    response = await openai_client.embeddings.create(input=batch, model=model)
+                    embeddings = [d.embedding for d in response.data]
+                    
+                    # Cache results if DB connection provided
+                    if db_conn:
+                        cur = db_conn.cursor()
+                        for j, emb in enumerate(embeddings):
+                            actual_idx = i + j
+                            if actual_idx < len(uncached_indices):
+                                orig_idx = uncached_indices[actual_idx]
+                                blob = np.array(emb, dtype=np.float32).tobytes()
+                                cur.execute(
+                                    "INSERT OR REPLACE INTO embeddings_cache (content_hash, embedding) VALUES (?, ?)",
+                                    (content_hashes[orig_idx], blob)
+                                )
+                        db_conn.commit()
+                    
+                    results.extend(embeddings)
+                except Exception as ex:
+                    logger.error(f"Error in compute_embeddings_batch: {ex}")
+                    # Generate empty embeddings as fallback
+                    dims = 1536  # Standard for text-embedding-3-large
+                    results.extend([np.zeros(dims).tolist() for _ in range(len(batch))])
+        else:
+            # Fallback to a simple bag-of-words approach with hash-based encoding
+            logger.warning("OpenAI not available, using simple hash-based embedding")
+            for text in uncached_texts:
+                # Simple hash-based embedding - not production quality!
+                hash_val = int(hashlib.md5(text.encode()).hexdigest(), 16)
+                random.seed(hash_val)
+                # Create a 384-dim vector as fallback (smaller than OpenAI's)
+                simple_emb = [random.uniform(-1, 1) for _ in range(384)]
+                normalized = simple_emb / np.linalg.norm(simple_emb)
+                results.append(normalized.tolist())
+
+    # Rearrange results if needed to match original order
+    if db_conn and len(uncached_indices) != len(texts):
+        final_results = [None] * len(texts)
+        uncached_idx = 0
+        for i in range(len(texts)):
+            if i in uncached_indices:
+                final_results[i] = results[uncached_idx]
+                uncached_idx += 1
+            else:
+                final_results[i] = results[i]
+        return final_results
+
+    return results
+
+async def compute_embedding(
+    text: str,
+    model: str = "text-embedding-3-large",
+    db_conn: Optional[sqlite3.Connection] = None
+) -> List[float]:
+    """
+    Compute embedding for a single text.
+    
+    Args:
+        text: Text to embed
+        model: Name of the embedding model to use
+        db_conn: Optional SQLite connection for caching
+        
+    Returns:
+        Embedding vector (list of floats)
+    """
+    result_list = await compute_embeddings_batch([text], model=model, db_conn=db_conn)
+    return result_list[0] if result_list else None
+
+###############################################################################
+# AST-BASED CODE CHUNKING & ADVANCED CODE MANAGEMENT
+###############################################################################
+
+class ASTChunker:
+    """
+    Parse a Python file with the ast module to extract top-level functions and classes.
+    """
+    def parse_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Parse a Python file and extract top-level functions and classes.
+        
+        Args:
+            file_path: Path to the Python file to parse
+            
+        Returns:
+            List of dictionaries with extracted code chunks
+        """
+        with open(file_path, "r", encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source)
+        lines = source.splitlines(keepends=True)
+        chunks = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                start_line = node.lineno - 1
+                end_line = node.end_lineno
+                chunk_text = "".join(lines[start_line:end_line])
+                chunk_type = "function" if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else "class"
+                chunks.append({
+                    "type": chunk_type,
+                    "name": node.name,
+                    "start_line": start_line + 1,
+                    "end_line": end_line,
+                    "content": chunk_text
+                })
+        return chunks
+
+class AdvancedCodeManager:
+    """
+    Loads and manages the agent's codebase with advanced indexing and rewriting capabilities.
+    Features:
+    - Full codebase indexing with AST parsing
+    - Code rewriting with error correction and in-memory validation
+    - Dynamic plugin loading
+    - Code change validation and rollback
+    - Semantic code search
+    - File locking for safe modifications
+    - In-memory code execution for testing
+    - In-memory code modification without changing files
+    - Database synchronization of code changes
+    - Memory snapshots and versioning for code changes
+    - Hot-swapping of code modules in runtime
+    - Conflict resolution for concurrent memory edits
+    - Live code patching without restart
+    """
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.backup_path = file_path + ".bak"
+        self.code_index = {}  # Maps file paths to AST nodes
+        self.function_index = {}  # Maps function names to locations
+        self.class_index = {}  # Maps class names to locations
+        self.dependency_graph = nx.DiGraph()  # Tracks code dependencies
+        self.modification_history = []  # Tracks all code changes
+        self.in_memory_changes = {}  # Stores proposed changes before committing
+        self.file_locks = {}  # Tracks file locks
+        self.memory_code = {}  # Stores in-memory code versions without file changes
+        self.memory_snapshots = {}  # Stores versioned snapshots of memory code
+        self.active_memory_version = {}  # Current active version for each file
+        self.edit_conflicts = {}  # Tracks edit conflicts
+        self.loaded_modules = {}  # Tracks loaded modules for hot-swapping
+        self.memory_locks = {}  # Locks for concurrent memory access
+        self.patch_listeners = []  # Callbacks for live code patching
+        self.sync_with_db = True  # Flag to control database synchronization
+        self.last_snapshot_id = 0  # Counter for snapshot IDs
+        self.auto_snapshot = True  # Whether to automatically take snapshots
+        self.load_code()
+
+    def load_code(self):
+        """Load and index all code files in the project"""
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            self.lines = f.readlines()
+            
+        # Initialize memory code with the file content
+        self.memory_code[self.file_path] = self.lines.copy()
+            
+        # Index the main file
+        self._index_file(self.file_path)
+        
+        # Index all Python files in the project
+        project_root = os.path.dirname(os.path.abspath(self.file_path))
+        for root, _, files in os.walk(project_root):
+            for file in files:
+                if file.endswith('.py'):
+                    file_path = os.path.join(root, file)
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.readlines()
+                        self.memory_code[file_path] = content
+                    self._index_file(file_path)
+    
+    def get_full_code(self) -> str:
+        """Get the full code as a string"""
+        if self.file_path in self.memory_code:
+            return "".join(self.memory_code[self.file_path])
+        return "".join(self.lines)
+                    
+    def _index_file(self, file_path: str):
+        """Create AST-based index for a Python file"""
+        try:
+            # Check if we have in-memory code for this file
+            if file_path in self.memory_code:
+                source = "".join(self.memory_code[file_path])
+            else:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    source = f.read()
+            
+            tree = ast.parse(source)
+                
+            # Store file's AST
+            self.code_index[file_path] = tree
+            
+            # Index functions and classes
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.function_index[node.name] = {
+                        'file': file_path,
+                        'line': node.lineno,
+                        'end_line': node.end_lineno,
+                        'ast_node': node
+                    }
+                elif isinstance(node, ast.ClassDef):
+                    self.class_index[node.name] = {
+                        'file': file_path,
+                        'line': node.lineno,
+                        'end_line': node.end_lineno,
+                        'ast_node': node
+                    }
+                    
+            # Build dependency graph
+            self._analyze_dependencies(file_path, tree)
+            
+        except Exception as e:
+            logger.error(f"Error indexing {file_path}: {e}")
+            
+    def _analyze_dependencies(self, file_path: str, tree: ast.AST):
+        """Analyze and record code dependencies"""
+        imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(n.name for n in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.append(node.module)
+                    
+        # Add edges to dependency graph
+        for imp in imports:
+            self.dependency_graph.add_edge(file_path, imp)
+
+    def backup(self):
+        """Create backup of all indexed files"""
+        for file_path in self.code_index:
+            backup_path = file_path + ".bak"
+            shutil.copy2(file_path, backup_path)
+            
+    def restore_backup(self):
+        """Restore all files from backup"""
+        restored = []
+        for file_path in self.code_index:
+            backup_path = file_path + ".bak"
+            if os.path.exists(backup_path):
+                shutil.copy2(backup_path, file_path)
+                restored.append(file_path)
+        self.load_code()
+        logger.info(f"Restored {len(restored)} files from backup")
+
+    def compile_code(self) -> bool:
+        """Compile and validate all indexed code"""
+        try:
+            # Compile each indexed file
+            for file_path, tree in self.code_index.items():
+                source = ast.unparse(tree)
+                compile(source, file_path, 'exec')
+                
+            # Validate imports and dependencies
+            import_errors = self._validate_imports()
+            if import_errors:
+                logger.error(f"Import validation errors: {import_errors}")
+                return False
+                
+            return True
+        except Exception as e:
+            logger.error(f"Compilation error: {e}")
+            return False
+            
+    def _validate_imports(self) -> List[str]:
+        """Validate all imports across the codebase"""
+        errors = []
+        for file_path in self.code_index:
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    os.path.basename(file_path)[:-3], 
+                    file_path
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as e:
+                errors.append(f"{file_path}: {str(e)}")
+        return errors
+
+    def get_code_element(self, element_type: str, name: str) -> Optional[Dict[str, Any]]:
+        """Get information about a code element by name"""
+        if element_type == "function":
+            return self.function_index.get(name)
+        elif element_type == "class":
+            return self.class_index.get(name)
+        return None
+        
+    def find_code(self, query: str) -> List[Dict[str, Any]]:
+        """Search for code elements using pattern matching"""
+        results = []
+        pattern = re.compile(query, re.IGNORECASE)
+        
+        # Search functions
+        for name, info in self.function_index.items():
+            if pattern.search(name) or pattern.search(ast.unparse(info['ast_node'])):
+                results.append({
+                    'type': 'function',
+                    'name': name,
+                    **info
+                })
+                
+        # Search classes
+        for name, info in self.class_index.items():
+            if pattern.search(name) or pattern.search(ast.unparse(info['ast_node'])):
+                results.append({
+                    'type': 'class',
+                    'name': name,
+                    **info
+                })
+                
+        return results
+        
+    def get_dependencies(self, element_name: str) -> Dict[str, List[str]]:
+        """Get dependencies for a code element"""
+        deps = {
+            'imports': [],
+            'called_by': [],
+            'calls': []
+        }
+        
+        element = self.function_index.get(element_name) or self.class_index.get(element_name)
+        if not element:
+            return deps
+            
+        # Analyze AST node for dependencies
+        node = element['ast_node']
+        for child in ast.walk(node):
+            if isinstance(child, ast.Import):
+                deps['imports'].extend(n.name for n in child.names)
+            elif isinstance(child, ast.ImportFrom):
+                if child.module:
+                    deps['imports'].append(child.module)
+            elif isinstance(child, ast.Call):
+                if isinstance(child.func, ast.Name):
+                    deps['calls'].append(child.func.id)
+                    
+        # Find functions that call this one
+        for fname, finfo in self.function_index.items():
+            if fname != element_name:
+                for node in ast.walk(finfo['ast_node']):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                        if node.func.id == element_name:
+                            deps['called_by'].append(fname)
+                            
+        return deps
+
+    def create_memory_snapshot(self, file_path: str, description: str = None) -> int:
+        """
+        Create a snapshot of the current memory code for a file
+        
+        Args:
+            file_path: Path to the file to snapshot
+            description: Optional description of the snapshot
+            
+        Returns:
+            int: Snapshot ID
+        """
+        if file_path not in self.memory_code:
+            return -1
+            
+        # Create snapshot
+        self.last_snapshot_id += 1
+        snapshot_id = self.last_snapshot_id
+        
+        if file_path not in self.memory_snapshots:
+            self.memory_snapshots[file_path] = {}
+            
+        # Copy the current memory code
+        self.memory_snapshots[file_path][snapshot_id] = {
+            'code': self.memory_code[file_path].copy(),
+            'timestamp': datetime.now().isoformat(),
+            'description': description or f"Snapshot {snapshot_id}",
+            'index': {
+                'functions': {k: v.copy() for k, v in self.function_index.items() 
+                            if v.get('file') == file_path},
+                'classes': {k: v.copy() for k, v in self.class_index.items() 
+                          if v.get('file') == file_path}
+            }
+        }
+        
+        # Update active version
+        self.active_memory_version[file_path] = snapshot_id
+        
+        logger.info(f"Created memory snapshot {snapshot_id} for {file_path}")
+        return snapshot_id
+        
+    def restore_memory_snapshot(self, file_path: str, snapshot_id: int) -> bool:
+        """
+        Restore a memory snapshot for a file
+        
+        Args:
+            file_path: Path to the file
+            snapshot_id: ID of the snapshot to restore
+            
+        Returns:
+            bool: Success status
+        """
+        if (file_path not in self.memory_snapshots or 
+            snapshot_id not in self.memory_snapshots[file_path]):
+            return False
+            
+        # Get snapshot
+        snapshot = self.memory_snapshots[file_path][snapshot_id]
+        
+        # Restore memory code
+        self.memory_code[file_path] = snapshot['code'].copy()
+        
+        # Restore indexes (filtering only for this file)
+        for func_name, func_info in snapshot['index']['functions'].items():
+            self.function_index[func_name] = func_info.copy()
+            
+        for class_name, class_info in snapshot['index']['classes'].items():
+            self.class_index[class_name] = class_info.copy()
+            
+        # Update active version
+        self.active_memory_version[file_path] = snapshot_id
+        
+        logger.info(f"Restored memory snapshot {snapshot_id} for {file_path}")
+        return True
+        
+    def get_memory_snapshots(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Get all memory snapshots for a file
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            List of snapshot metadata
+        """
+        if file_path not in self.memory_snapshots:
+            return []
+            
+        return [
+            {
+                'id': snapshot_id,
+                'timestamp': info['timestamp'],
+                'description': info['description'],
+                'active': self.active_memory_version.get(file_path) == snapshot_id
+            }
+            for snapshot_id, info in self.memory_snapshots[file_path].items()
+        ]
+        
+    async def hot_swap_module(self, file_path: str) -> bool:
+        """
+        Hot-swap a module with its in-memory version
+        
+        Args:
+            file_path: Path to the module file
+            
+        Returns:
+            bool: Success status
+        """
+        if file_path not in self.memory_code:
+            return False
+            
+        try:
+            # Get module name from file path
+            module_name = os.path.basename(file_path).replace('.py', '')
+            
+            # Check if module is loaded
+            if module_name not in sys.modules:
+                logger.warning(f"Module {module_name} is not loaded, cannot hot-swap")
+                return False
+                
+            # Create a temporary module
+            temp_module = types.ModuleType(module_name)
+            
+            # Compile the memory code
+            memory_code = "".join(self.memory_code[file_path])
+            code_obj = compile(memory_code, file_path, 'exec')
+            
+            # Execute the compiled code in the temporary module
+            exec(code_obj, temp_module.__dict__)
+            
+            # Store the original module
+            original_module = sys.modules[module_name]
+            self.loaded_modules[module_name] = original_module
+            
+            # Replace the module in sys.modules
+            sys.modules[module_name] = temp_module
+            
+            # Update any imported references
+            for mod_name, mod in list(sys.modules.items()):
+                if mod_name != module_name and hasattr(mod, module_name):
+                    setattr(mod, module_name, temp_module)
+                    
+            # Notify patch listeners
+            for listener in self.patch_listeners:
+                try:
+                    asyncio.create_task(listener(module_name, temp_module))
+                except Exception as e:
+                    logger.error(f"Error notifying patch listener: {e}")
+                    
+            logger.info(f"Hot-swapped module {module_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error hot-swapping module: {e}")
+            return False
+            
+    def register_patch_listener(self, listener_func) -> int:
+        """
+        Register a listener for code patches
+        
+        Args:
+            listener_func: Async function to call when code is patched
+            
+        Returns:
+            int: Listener ID
+        """
+        self.patch_listeners.append(listener_func)
+        return len(self.patch_listeners) - 1
+        
+    def unregister_patch_listener(self, listener_id: int) -> bool:
+        """
+        Unregister a patch listener
+        
+        Args:
+            listener_id: ID of the listener to unregister
+            
+        Returns:
+            bool: Success status
+        """
+        if 0 <= listener_id < len(self.patch_listeners):
+            self.patch_listeners.pop(listener_id)
+            return True
+        return False
+        
+    async def edit_in_memory(self, file_path: str, new_content: str, reindex: bool = True, 
+                            sync_db: bool = None, take_snapshot: bool = None) -> bool:
+        """
+        Edit code in memory without modifying the actual file.
+        
+        Args:
+            file_path: Path to the file to modify in memory
+            new_content: New content for the file
+            reindex: Whether to reindex the file after modification
+            sync_db: Whether to sync changes with the database (None uses global setting)
+            take_snapshot: Whether to take a snapshot (None uses auto_snapshot setting)
+            
+        Returns:
+            bool: Success status
+        """
+        # Acquire memory lock
+        if file_path in self.memory_locks:
+            # Wait for lock to be released (with timeout)
+            for _ in range(10):  # Try for up to 1 second
+                if not self.memory_locks[file_path]:
+                    break
+                await asyncio.sleep(0.1)
+                
+            if self.memory_locks[file_path]:
+                logger.error(f"Timeout waiting for memory lock on {file_path}")
+                return False
+                
+        # Set memory lock
+        self.memory_locks[file_path] = True
+        
+        try:
+            # Check for conflicts
+            if file_path in self.edit_conflicts and self.edit_conflicts[file_path]:
+                # Try to resolve conflict
+                resolved = await self._resolve_edit_conflict(file_path, new_content)
+                if not resolved:
+                    logger.warning(f"Unresolved edit conflict for {file_path}")
+                    # Continue anyway, but mark as conflicted
+            
+            # Try to compile first to validate syntax
+            compile(new_content, file_path, 'exec')
+            
+            # Create snapshot if needed
+            should_snapshot = self.auto_snapshot if take_snapshot is None else take_snapshot
+            if should_snapshot and file_path in self.memory_code:
+                self.create_memory_snapshot(file_path, "Pre-edit snapshot")
+            
+            # Store new content as lines
+            if isinstance(new_content, str):
+                self.memory_code[file_path] = new_content.splitlines(True)
+            else:
+                self.memory_code[file_path] = new_content
+                
+            # Log change
+            self.modification_history.append({
+                'timestamp': datetime.now().isoformat(),
+                'file_path': file_path,
+                'action': 'memory_edit',
+                'content_length': len(new_content)
+            })
+            
+            # Reindex if requested
+            if reindex:
+                self._index_file(file_path)
+                
+            # Sync with DB if requested
+            should_sync = self.sync_with_db if sync_db is None else sync_db
+            if should_sync:
+                asyncio.create_task(self._sync_memory_code_with_db(file_path))
+                
+            # Clear any conflicts
+            if file_path in self.edit_conflicts:
+                self.edit_conflicts[file_path] = []
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error editing code in memory: {e}")
+            return False
+            
+        finally:
+            # Release memory lock
+            self.memory_locks[file_path] = False
+            
+    def get_memory_code(self, file_path: str) -> str:
+        """Get the in-memory version of the file's code"""
+        if file_path in self.memory_code:
+            return "".join(self.memory_code[file_path])
+        return None
+        
+    async def _resolve_edit_conflict(self, file_path: str, new_content: str) -> bool:
+        """
+        Attempt to resolve edit conflicts
+        
+        Args:
+            file_path: Path to the file
+            new_content: New content being applied
+            
+        Returns:
+            bool: Whether the conflict was resolved
+        """
+        if file_path not in self.edit_conflicts:
+            return True
+            
+        conflicts = self.edit_conflicts[file_path]
+        if not conflicts:
+            return True
+            
+        try:
+            # Get the current memory content
+            current_content = "".join(self.memory_code[file_path])
+            
+            # For each conflict, try to merge changes
+            resolved_conflicts = []
+            
+            for conflict in conflicts:
+                conflict_content = conflict.get('content', '')
+                
+                # Get a diff of the conflict content vs current memory
+                conflict_diff = list(difflib.unified_diff(
+                    current_content.splitlines(),
+                    conflict_content.splitlines(),
+                    n=3
+                ))
+                
+                # Get a diff of the new content vs current memory
+                new_diff = list(difflib.unified_diff(
+                    current_content.splitlines(),
+                    new_content.splitlines(),
+                    n=3
+                ))
+                
+                # Check if the diffs overlap (edit the same lines)
+                conflict_hunks = self._parse_diff_hunks(conflict_diff)
+                new_hunks = self._parse_diff_hunks(new_diff)
+                
+                overlap = False
+                for c_hunk in conflict_hunks:
+                    for n_hunk in new_hunks:
+                        if self._hunks_overlap(c_hunk, n_hunk):
+                            overlap = True
+                            break
+                    if overlap:
+                        break
+                        
+                if not overlap:
+                    # No overlap, can be auto-merged
+                    resolved_conflicts.append(conflict)
+                    logger.info(f"Auto-resolved conflict for {file_path}")
+                    
+            # Remove resolved conflicts
+            for conflict in resolved_conflicts:
+                if conflict in self.edit_conflicts[file_path]:
+                    self.edit_conflicts[file_path].remove(conflict)
+                    
+            return len(self.edit_conflicts[file_path]) == 0
+            
+        except Exception as e:
+            logger.error(f"Error resolving edit conflict: {e}")
+            return False
+            
+    def _parse_diff_hunks(self, diff_lines: List[str]) -> List[Dict[str, Any]]:
+        """
+        Parse diff output into hunks
+        
+        Args:
+            diff_lines: Output from difflib.unified_diff
+            
+        Returns:
+            List of hunks, each with start and end line numbers
+        """
+        hunks = []
+        current_hunk = None
+        
+        for line in diff_lines:
+            if line.startswith('@@'):
+                # New hunk
+                if current_hunk:
+                    hunks.append(current_hunk)
+                    
+                # Parse hunk header like @@ -1,7 +1,6 @@
+                hunk_re = r'@@ -(\d+),(\d+) \+(\d+),(\d+) @@'
+                match = re.search(hunk_re, line)
+                if match:
+                    a_start, a_len, b_start, b_len = map(int, match.groups())
+                    current_hunk = {
+                        'a_start': a_start,
+                        'a_end': a_start + a_len - 1,
+                        'b_start': b_start,
+                        'b_end': b_start + b_len - 1
+                    }
+        
+        if current_hunk:
+            hunks.append(current_hunk)
+            
+        return hunks
+        
+    def _hunks_overlap(self, hunk1: Dict[str, Any], hunk2: Dict[str, Any]) -> bool:
+        """
+        Check if two diff hunks overlap
+        
+        Args:
+            hunk1: First hunk
+            hunk2: Second hunk
+            
+        Returns:
+            bool: Whether the hunks overlap
+        """
+        # Check if the ranges overlap
+        return (
+            (hunk1['a_start'] <= hunk2['a_end'] and hunk1['a_end'] >= hunk2['a_start']) or
+            (hunk1['b_start'] <= hunk2['b_end'] and hunk1['b_end'] >= hunk2['b_start'])
+        )
+        
+    def mark_edit_conflict(self, file_path: str, editor_id: str, content: str) -> None:
+        """
+        Mark an edit conflict for a file
+        
+        Args:
+            file_path: Path to the file
+            editor_id: ID of the editor that made the conflicting change
+            content: The conflicting content
+        """
+        if file_path not in self.edit_conflicts:
+            self.edit_conflicts[file_path] = []
+            
+        self.edit_conflicts[file_path].append({
+            'editor_id': editor_id,
+            'content': content,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        logger.warning(f"Edit conflict marked for {file_path} by {editor_id}")
+        
+    def get_memory_file_diff(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Get differences between in-memory code and actual file
+        
+        Args:
+            file_path: Path to the file to check
+            
+        Returns:
+            List of dictionaries with differences: 
+            [{'line': line_number, 'file': file_line, 'memory': memory_line}]
+        """
+        import difflib
+        
+        if file_path not in self.memory_code:
+            return []
+            
+        # Get memory code
+        memory_lines = self.memory_code[file_path]
+        
+        # Get file code
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_lines = f.readlines()
+                
+            # Find differences
+            diffs = []
+            matcher = difflib.SequenceMatcher(None, file_lines, memory_lines)
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag in ['replace', 'delete', 'insert']:
+                    for line_num in range(i1, i2):
+                        if line_num < len(file_lines):
+                            diffs.append({
+                                'line': line_num + 1,
+                                'file': file_lines[line_num].rstrip('\n'),
+                                'memory': memory_lines[line_num].rstrip('\n') if line_num < len(memory_lines) else None,
+                                'type': tag
+                            })
+                    for line_num in range(j1, j2):
+                        if line_num >= len(file_lines) or line_num >= i2:
+                            diffs.append({
+                                'line': line_num + 1,
+                                'file': None if line_num >= len(file_lines) else file_lines[line_num].rstrip('\n'),
+                                'memory': memory_lines[line_num].rstrip('\n'),
+                                'type': tag
+                            })
+            return diffs
+        except Exception as e:
+            logger.error(f"Error getting file diff: {e}")
+            return []
+            
+    async def _sync_memory_code_with_db(self, file_path: str) -> bool:
+        """Synchronize memory code with database for collaborative editing"""
+        # This is a placeholder for the actual implementation
+        # In a real implementation, this would:
+        # 1. Compute a diff between the previous version and the current memory code
+        # 2. Store the diff in the database with a timestamp
+        # 3. Set a flag indicating that the code has been synchronized
+        logger.info(f"Syncing memory code for {file_path} with database")
+        return True
+
+###############################################################################
+# REINFORCEMENT LEARNING AGENTS
+###############################################################################
+
+class BaseRLAgent:
+    """
+    Base class for RL agents that wrap an LLM or any other policy model.
+    Provides interfaces for training steps, policy actions, and updating neural networks.
+    """
+
+    def act(self, state) -> int:
+        """
+        Decide on an action given the current state.
+        """
+        raise NotImplementedError
+
+    def update_network(self, transitions) -> None:
+        """
+        Perform a training update for the agent.
+        """
+        raise NotImplementedError
+
+    def set_eval_mode(self):
+        """
+        Switch the agent to evaluation mode.
+        """
+        raise NotImplementedError
+
+    def set_train_mode(self):
+        """
+        Switch the agent to training mode.
+        """
+        raise NotImplementedError
+
+# Only define torch-based agents if PyTorch is available
+if TORCH_AVAILABLE:
+    class SimplePolicyAgent(BaseRLAgent):
+        """
+        Implements a very naive policy gradient approach where we collect rollouts
+        and perform a gradient ascent step on the log-probabilities weighted by returns.
+        This is for demonstration and not recommended for production.
+        """
+
+        def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3):
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            self.policy_network = nn.Sequential(
+                nn.Linear(state_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, action_dim),
+                nn.Softmax(dim=-1)
+            )
+            self.optimizer = optim.Adam(self.policy_network.parameters(), lr=lr)
+
+        def act(self, state):
+            s = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            probs = self.policy_network(s).squeeze(0)
+            action_dist = torch.distributions.Categorical(probs=probs)
+            action = action_dist.sample()
+            return action.item()
+
+        def update_network(self, transitions):
+            """
+            transitions: list of (state, action, reward, next_state, done)
+            We'll do a simple REINFORCE: sum of log-probs * discounted returns
+            """
+            self.set_train_mode()
+            returns = 0
+            loss = 0
+            gamma = 0.99
+
+            for (state, action, reward, _, _) in reversed(transitions):
+                returns = reward + gamma * returns
+                s = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+                probs = self.policy_network(s).squeeze(0)
+                action_dist = torch.distributions.Categorical(probs=probs)
+                log_prob = action_dist.log_prob(torch.tensor(action))
+                loss = loss - log_prob * returns
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+        def set_eval_mode(self):
+            self.policy_network.eval()
+
+        def set_train_mode(self):
+            self.policy_network.train()
+
+    class GRPOAgent(BaseRLAgent):
+        """
+        A demonstration of Group Relative Policy Optimization that bypasses the critic
+        by sampling multiple responses and normalizing the reward.
+        """
+        def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2, entropy_coef: float = 0.01, num_epochs: int = 3, kl_target: float = 0.01):
+            super().__init__()
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            self.clip_epsilon = clip_epsilon
+            self.entropy_coef = entropy_coef
+            self.num_epochs = num_epochs
+            self.kl_target = kl_target
+
+            self.policy_network = nn.Sequential(
+                nn.Linear(state_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, action_dim),
+                nn.Softmax(dim=-1)
+            )
+            self.old_policy_network = nn.Sequential(
+                nn.Linear(state_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, action_dim),
+                nn.Softmax(dim=-1)
+            )
+            self.old_policy_network.load_state_dict(self.policy_network.state_dict())
+
+            self.optimizer = optim.Adam(self.policy_network.parameters(), lr=lr)
+
+        def act(self, state):
+            s = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            probs = self.policy_network(s).squeeze(0)
+            action_dist = torch.distributions.Categorical(probs=probs)
+            return action_dist.sample().item()
+
+        def update_network(self, group_experiences):
+            """
+            group_experiences:
+                A list containing multiple groups. Each group is itself a list of (state, action, reward).
+                We'll compute advantage as normalised reward within each group,
+                then perform a clipped update similar to PPO, but without a critic.
+            """
+            self.set_train_mode()
+
+            # Copy current policy to old policy
+            self.old_policy_network.load_state_dict(self.policy_network.state_dict())
+
+            # Flatten experiences into arrays
+            all_states = []
+            all_actions = []
+            all_advantages = []
+            for experiences in group_experiences:
+                rewards = [exp[2] for exp in experiences]
+                mean_r = sum(rewards) / len(rewards) if len(rewards) else 0.0
+                var_r = sum([(r - mean_r)**2 for r in rewards]) / len(rewards) if len(rewards) > 1 else 1e-8
+                std_r = var_r**0.5
+                std_r = max(std_r, 1e-8)
+
+                for (st, ac, rw) in experiences:
+                    adv = (rw - mean_r) / std_r
+                    all_states.append(st)
+                    all_actions.append(ac)
+                    all_advantages.append(adv)
+
+            states_t = torch.tensor(all_states, dtype=torch.float32)
+            actions_t = torch.tensor(all_actions, dtype=torch.long)
+            advantages_t = torch.tensor(all_advantages, dtype=torch.float32)
+
+            # We do multiple epochs of updates
+            for epoch in range(self.num_epochs):
+                # Forward pass on current policy
+                current_probs = self.policy_network(states_t)
+                current_actions_probs = torch.gather(current_probs, 1, actions_t.unsqueeze(1)).squeeze(1)
+                current_log_probs = torch.log(current_actions_probs + 1e-8)
+
+                # Old policy log probs
+                old_probs = self.old_policy_network(states_t)
+                old_actions_probs = torch.gather(old_probs, 1, actions_t.unsqueeze(1)).squeeze(1)
+                old_log_probs = torch.log(old_actions_probs + 1e-8)
+
+                # Calculate ratio and clipped objective
+                ratio = torch.exp(current_log_probs - old_log_probs)
+                clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
+                loss_1 = ratio * advantages_t
+                loss_2 = clipped_ratio * advantages_t
+                policy_loss = -torch.min(loss_1, loss_2).mean()
+
+                # Entropy for exploration
+                entropy = -torch.sum(current_probs * torch.log(current_probs + 1e-8), dim=1).mean()
+                policy_loss = policy_loss - self.entropy_coef * entropy
+
+                # KL divergence check
+                with torch.no_grad():
+                    kl_div = (old_probs * (torch.log(old_probs + 1e-8) - torch.log(current_probs + 1e-8))).sum(dim=1).mean()
+
+                self.optimizer.zero_grad()
+                policy_loss.backward()
+                self.optimizer.step()
+
+                # Early stopping if KL exceeds target
+                if kl_div.item() > self.kl_target:
+                    break
+
+        def set_eval_mode(self):
+            self.policy_network.eval()
+
+        def set_train_mode(self):
+            self.policy_network.train()
+
+    class PPOAgent(BaseRLAgent):
+        """
+        A simplified PPO implementation, excluding many advanced features like GAE-lambda or advantage normalization.
+        Demonstrates clipped objective for stable improvements.
+        """
+
+        def __init__(
+            self,
+            state_dim: int,
+            action_dim: int,
+            hidden_size: int = 128,
+            lr: float = 1e-3,
+            clip_epsilon: float = 0.2
+        ):
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            self.clip_epsilon = clip_epsilon
+
+            # Policy & old policy
+            self.policy_network = nn.Sequential(
+                nn.Linear(state_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, action_dim),
+                nn.Softmax(dim=-1)
+            )
+            self.old_policy_network = nn.Sequential(
+                nn.Linear(state_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, action_dim),
+                nn.Softmax(dim=-1)
+            )
+            self.old_policy_network.load_state_dict(self.policy_network.state_dict())
+
+            self.optimizer = optim.Adam(self.policy_network.parameters(), lr=lr)
+
+        def act(self, state):
+            s = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            probs = self.policy_network(s).squeeze(0)
+            action_dist = torch.distributions.Categorical(probs=probs)
+            action = action_dist.sample()
+            return action.item()
+
+        def update_network(self, transitions):
+            """
+            transitions: list of (state, action, reward, next_state, done)
+            We'll do a simplified advantage (reward - baseline=0).
+            Then apply PPO clip objective.
+            """
+            self.set_train_mode()
+
+            # Copy current net to old net
+            self.old_policy_network.load_state_dict(self.policy_network.state_dict())
+
+            all_states = []
+            all_actions = []
+            all_returns = []
+
+            returns = 0
+            gamma = 0.99
+
+            for (state, action, reward, _, _) in reversed(transitions):
+                returns = reward + gamma * returns
+                all_states.insert(0, state)
+                all_actions.insert(0, action)
+                all_returns.insert(0, returns)
+
+            states_t = torch.tensor(all_states, dtype=torch.float32)
+            actions_t = torch.tensor(all_actions, dtype=torch.long)
+            returns_t = torch.tensor(all_returns, dtype=torch.float32)
+
+            # Current policy
+            current_probs = self.policy_network(states_t)
+            current_dist = torch.distributions.Categorical(probs=current_probs)
+            current_log_probs = current_dist.log_prob(actions_t)
+
+            # Old policy
+            old_probs = self.old_policy_network(states_t)
+            old_dist = torch.distributions.Categorical(probs=old_probs)
+            old_log_probs = old_dist.log_prob(actions_t).detach()
+
+            ratio = torch.exp(current_log_probs - old_log_probs)
+            # Advantage ~ returns_t (no baseline for simplicity)
+            advantage = returns_t
+
+            # Clipped objective
+            clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
+            loss_1 = ratio * advantage
+            loss_2 = clipped_ratio * advantage
+            loss = -torch.min(loss_1, loss_2).mean()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+        def set_eval_mode(self):
+            self.policy_network.eval()
+
+        def set_train_mode(self):
+            self.policy_network.train()
+
+    class TRPOAgent(BaseRLAgent):
+        """
+        A placeholder TRPO agent. Real TRPO uses conjugate gradient to solve a constrained
+        optimization problem. This is just a stub illustrating how we'd structure it.
+        """
+
+        def __init__(
+            self,
+            state_dim: int,
+            action_dim: int,
+            hidden_size: int = 128,
+            lr: float = 1e-3,
+            max_kl: float = 0.01
+        ):
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            self.policy_network = nn.Sequential(
+                nn.Linear(state_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, action_dim),
+                nn.Softmax(dim=-1)
+            )
+            self.optimizer = optim.Adam(self.policy_network.parameters(), lr=lr)
+            self.max_kl = max_kl
+
+        def act(self, state):
+            s = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            probs = self.policy_network(s).squeeze(0)
+            action_dist = torch.distributions.Categorical(probs=probs)
+            action = action_dist.sample()
+            return action.item()
+
+        def update_network(self, transitions):
+            """
+            With actual TRPO, we would do:
+              1) Compute advantage
+              2) Compute policy gradient with conjugate gradient, ensuring KL divergence < max_kl
+              3) Update policy parameters
+            This function is a placeholder to illustrate structure only.
+            """
+            self.set_train_mode()
+            # Collect states, actions, rewards
+            returns = 0
+            gamma = 0.99
+            all_states = []
+            all_actions = []
+            all_returns = []
+            for (state, action, reward, _, _) in reversed(transitions):
+                returns = reward + gamma * returns
+                all_states.insert(0, state)
+                all_actions.insert(0, action)
+                all_returns.insert(0, returns)
+            # Pseudocode for TRPO:
+            #  advantage = all_returns - baseline
+            #  grad = compute_policy_gradient(self.policy_network, states, actions, advantage)
+            #  stepdir = conjugate_gradient(grad, fisher_vector_product, self.max_kl)
+            #  line_search_update(self.policy_network, stepdir)
+            pass
+
+        def set_eval_mode(self):
+            self.policy_network.eval()
+
+        def set_train_mode(self):
+            self.policy_network.train()
+else:
+    # Placeholder implementations when PyTorch is not available
+    class SimplePolicyAgent(BaseRLAgent):
+        def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3):
+            logger.warning("PyTorch not available. Using placeholder SimplePolicyAgent.")
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            
+        def act(self, state):
+            return random.randint(0, self.action_dim - 1)
+            
+        def update_network(self, transitions):
+            pass
+            
+        def set_eval_mode(self):
+            pass
+            
+        def set_train_mode(self):
+            pass
+            
+    class GRPOAgent(BaseRLAgent):
+        def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2, entropy_coef: float = 0.01, num_epochs: int = 3, kl_target: float = 0.01):
+            logger.warning("PyTorch not available. Using placeholder GRPOAgent.")
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            
+        def act(self, state):
+            return random.randint(0, self.action_dim - 1)
+            
+        def update_network(self, group_experiences):
+            pass
+            
+        def set_eval_mode(self):
+            pass
+            
+        def set_train_mode(self):
+            pass
+            
+    class PPOAgent(BaseRLAgent):
+        def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, clip_epsilon: float = 0.2):
+            logger.warning("PyTorch not available. Using placeholder PPOAgent.")
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            
+        def act(self, state):
+            return random.randint(0, self.action_dim - 1)
+            
+        def update_network(self, transitions):
+            pass
+            
+        def set_eval_mode(self):
+            pass
+            
+        def set_train_mode(self):
+            pass
+            
+    class TRPOAgent(BaseRLAgent):
+        def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 128, lr: float = 1e-3, max_kl: float = 0.01):
+            logger.warning("PyTorch not available. Using placeholder TRPOAgent.")
+            self.state_dim = state_dim
+            self.action_dim = action_dim
+            
+        def act(self, state):
+            return random.randint(0, self.action_dim - 1)
+            
+        def update_network(self, transitions):
+            pass
+            
+        def set_eval_mode(self):
+            pass
+            
+        def set_train_mode(self):
+            pass
 
 ###############################################################################
 # TOKEN BUDGET MANAGEMENT
@@ -685,6 +3422,7 @@ class CognitiveBehavior(str, Enum):
     """
     Defines the key cognitive behaviors that the agent can exhibit during reasoning.
     """
+    # Original behaviors
     VERIFICATION = "verification"
     BACKTRACKING = "backtracking"
     SUBGOAL_SETTING = "subgoal_setting"
@@ -697,14 +3435,205 @@ class CognitiveBehavior(str, Enum):
     CREATIVITY = "creativity"
     ABSTRACTION = "abstraction"
     ANALOGY = "analogy"
-    COUNTERFACTUAL = "counterfactual"
-    METACOGNITION = "metacognition"
-    UNCERTAINTY = "uncertainty"
+    
+    # Game theory and strategic behaviors
+    MULTIAGENT_REASONING = "multiagent_reasoning"
+    OPPONENT_MODELING = "opponent_modeling"
+    COUNTERFACTUAL_THINKING = "counterfactual_thinking"
+    RESOURCE_ALLOCATION = "resource_allocation"
+    RISK_ASSESSMENT = "risk_assessment"
+    TEMPORAL_PROJECTION = "temporal_projection"
+    DECISION_TREE_ANALYSIS = "decision_tree_analysis"
+    BAYESIAN_UPDATING = "bayesian_updating"
+    NASH_EQUILIBRIUM_SEEKING = "nash_equilibrium_seeking"
+    STRATEGIC_DECEPTION = "strategic_deception"
+    COOPERATIVE_PLANNING = "cooperative_planning"
+    COMPETITIVE_PLANNING = "competitive_planning"
+    COALITION_FORMATION = "coalition_formation"
+    NEGOTIATION = "negotiation"
+    COMMITMENT_MANAGEMENT = "commitment_management"
+    REPUTATION_MODELING = "reputation_modeling"
+    
+    # Learning and adaptation
+    REINFORCEMENT_LEARNING = "reinforcement_learning"
+    TRANSFER_LEARNING = "transfer_learning"
+    META_LEARNING = "meta_learning"
     CAUSAL_REASONING = "causal_reasoning"
+    CONCEPT_FORMATION = "concept_formation"
+    SKILL_REFINEMENT = "skill_refinement"
     HYPOTHESIS_TESTING = "hypothesis_testing"
+    COMPARATIVE_ANALYSIS = "comparative_analysis"
+    PATTERN_RECOGNITION = "pattern_recognition"
+    ANOMALY_DETECTION = "anomaly_detection"
+    
+    # Long-term strategic behaviors
+    GRAND_STRATEGY_FORMATION = "grand_strategy_formation"
+    TREND_PROJECTION = "trend_projection"
+    SCENARIO_PLANNING = "scenario_planning"
+    OPPORTUNITY_IDENTIFICATION = "opportunity_identification"
+    THREAT_ASSESSMENT = "threat_assessment"
+    RESOURCE_CULTIVATION = "resource_cultivation"
+    STRATEGIC_POSITIONING = "strategic_positioning"
+    NETWORK_EFFECT_ANALYSIS = "network_effect_analysis"
+    TECHNOLOGICAL_FORECASTING = "technological_forecasting"
+    POLITICAL_ANALYSIS = "political_analysis"
+    ECONOMIC_FORECASTING = "economic_forecasting"
+    DEMOGRAPHIC_ANALYSIS = "demographic_analysis"
+    
+    # Metacognition & cognitive governance
+    COGNITIVE_BIAS_CORRECTION = "cognitive_bias_correction"
+    EXPERTISE_CALIBRATION = "expertise_calibration"
+    ATTENTION_ALLOCATION = "attention_allocation"
+    MENTAL_SIMULATION = "mental_simulation"
+    PERSPECTIVE_TAKING = "perspective_taking"
+    COGNITIVE_DECOUPLING = "cognitive_decoupling"
+    EPISTEMIC_VIGILANCE = "epistemic_vigilance"
+    INSIGHT_CULTIVATION = "insight_cultivation"
+    METACOGNITIVE_MONITORING = "metacognitive_monitoring"
+    METACOGNITIVE_CONTROL = "metacognitive_control"
+    RATIONALITY_CHECKING = "rationality_checking"
+    CONTRADICTION_DETECTION = "contradiction_detection"
+    
+    # Communication & coordination
+    INFORMATION_SHARING = "information_sharing"
+    KNOWLEDGE_INTEGRATION = "knowledge_integration"
+    TEAM_COORDINATION = "team_coordination"
+    CONFLICT_RESOLUTION = "conflict_resolution"
+    PREFERENCE_AGGREGATION = "preference_aggregation"
+    CONSENSUS_BUILDING = "consensus_building"
+    ROLE_ASSIGNMENT = "role_assignment"
+    SHARED_MENTAL_MODEL_BUILDING = "shared_mental_model_building"
+    COMMUNICATION_OPTIMIZATION = "communication_optimization"
+    COMMON_KNOWLEDGE_MANAGEMENT = "common_knowledge_management"
+    TRUST_BUILDING = "trust_building"
+    
+    # Analysis
+    ANALYSIS = "analysis"
+    METACOGNITION = "metacognition"
+    COUNTERFACTUAL = "counterfactual"
+    UNCERTAINTY = "uncertainty"
     ABDUCTIVE_REASONING = "abductive_reasoning"
     DEDUCTIVE_REASONING = "deductive_reasoning"
     INDUCTIVE_REASONING = "inductive_reasoning"
+    
+    # Decision making and optimization
+    UTILITY_MAXIMIZATION = "utility_maximization"
+    SATISFICING = "satisficing"
+    HEURISTIC_DECISION_MAKING = "heuristic_decision_making"
+    MULTI_CRITERIA_DECISION_MAKING = "multi_criteria_decision_making"
+    CONSTRAINED_OPTIMIZATION = "constrained_optimization"
+    STOCHASTIC_OPTIMIZATION = "stochastic_optimization"
+    LINEAR_PROGRAMMING = "linear_programming"
+    DYNAMIC_PROGRAMMING = "dynamic_programming"
+    GREEDY_ALGORITHM = "greedy_algorithm"
+    SIMULATED_ANNEALING = "simulated_annealing"
+    GENETIC_ALGORITHM = "genetic_algorithm"
+    SWARM_OPTIMIZATION = "swarm_optimization"
+    GRADIENT_DESCENT = "gradient_descent"
+    HILL_CLIMBING = "hill_climbing"
+    
+    # Probabilistic reasoning
+    PROBABILISTIC_INFERENCE = "probabilistic_inference"
+    MONTE_CARLO_SIMULATION = "monte_carlo_simulation"
+    SENSITIVITY_ANALYSIS = "sensitivity_analysis"
+    SCENARIO_ANALYSIS = "scenario_analysis"
+    EXPECTED_VALUE_CALCULATION = "expected_value_calculation"
+    VARIANCE_REDUCTION = "variance_reduction"
+    MARKOV_DECISION_PROCESS = "markov_decision_process"
+    HIDDEN_MARKOV_MODEL = "hidden_markov_model"
+    BELIEF_REVISION = "belief_revision"
+    DEMPSTER_SHAFER_THEORY = "dempster_shafer_theory"
+    FUZZY_LOGIC = "fuzzy_logic"
+    POSSIBILISTIC_REASONING = "possibilistic_reasoning"
+    
+    # Evolutionary and adaptive behaviors
+    EVOLUTIONARY_ADAPTATION = "evolutionary_adaptation"
+    CO_EVOLUTIONARY_DYNAMICS = "co_evolutionary_dynamics"
+    CULTURAL_EVOLUTION = "cultural_evolution"
+    MEME_PROPAGATION = "meme_propagation"
+    SELECTIVE_PRESSURE_ANALYSIS = "selective_pressure_analysis"
+    FITNESS_LANDSCAPE_ANALYSIS = "fitness_landscape_analysis"
+    NICHE_CONSTRUCTION = "niche_construction"
+    RED_QUEEN_DYNAMICS = "red_queen_dynamics"
+    Baldwin_EFFECT = "baldwin_effect"
+    EXAPTATION = "exaptation"
+    GENETIC_DRIFT = "genetic_drift"
+    EPISTASIS = "epistasis"
+    
+    # Network and systems behaviors
+    NETWORK_ANALYSIS = "network_analysis"
+    SYSTEMS_THINKING = "systems_thinking"
+    FEEDBACK_LOOP_ANALYSIS = "feedback_loop_analysis"
+    CAUSAL_LOOP_DIAGRAMMING = "causal_loop_diagramming"
+    STOCK_AND_FLOW_MODELING = "stock_and_flow_modeling"
+    TIPPING_POINT_ANALYSIS = "tipping_point_analysis"
+    RESILIENCE_ASSESSMENT = "resilience_assessment"
+    ROBUSTNESS_ANALYSIS = "robustness_analysis"
+    MODULARITY_ANALYSIS = "modularity_analysis"
+    CENTRALITY_ANALYSIS = "centrality_analysis"
+    SMALL_WORLD_NETWORK = "small_world_network"
+    SCALE_FREE_NETWORK = "scale_free_network"
+    
+    # Information theory and complexity
+    INFORMATION_THEORETIC_ANALYSIS = "information_theoretic_analysis"
+    ENTROPY_MEASUREMENT = "entropy_measurement"
+    COMPLEXITY_ASSESSMENT = "complexity_assessment"
+    KOLMOGOROV_COMPLEXITY = "kolmogorov_complexity"
+    MINIMUM_DESCRIPTION_LENGTH = "minimum_description_length"
+    ALGORITHMIC_INFORMATION_THEORY = "algorithmic_information_theory"
+    SHANNON_INFORMATION = "shannon_information"
+    MUTUAL_INFORMATION = "mutual_information"
+    INFORMATION_BOTTLENECK = "information_bottleneck"
+    INFORMATION_CASCADE = "information_cascade"
+    CHANNEL_CAPACITY = "channel_capacity"
+    
+    # Market and economic behaviors
+    MARKET_ANALYSIS = "market_analysis"
+    SUPPLY_DEMAND_ANALYSIS = "supply_demand_analysis"
+    PRICE_DISCRIMINATION = "price_discrimination"
+    MARKET_SEGMENTATION = "market_segmentation"
+    COMPETITIVE_POSITIONING = "competitive_positioning"
+    VALUE_CHAIN_ANALYSIS = "value_chain_analysis"
+    OPPORTUNITY_COST_ANALYSIS = "opportunity_cost_analysis"
+    COMPARATIVE_ADVANTAGE = "comparative_advantage"
+    ABSOLUTE_ADVANTAGE = "absolute_advantage"
+    ECONOMIES_OF_SCALE = "economies_of_scale"
+    ECONOMIES_OF_SCOPE = "economies_of_scope"
+    NETWORK_EXTERNALITY = "network_externality"
+    MARKET_POWER_ASSESSMENT = "market_power_assessment"
+    CONSUMER_SURPLUS = "consumer_surplus"
+    PRODUCER_SURPLUS = "producer_surplus"
+    DEADWEIGHT_LOSS = "deadweight_loss"
+    ELASTICITY_ANALYSIS = "elasticity_analysis"
+    INDIFFERENCE_CURVE = "indifference_curve"
+    MARGINAL_UTILITY = "marginal_utility"
+    MARGINAL_COST = "marginal_cost"
+    MARGINAL_REVENUE = "marginal_revenue"
+    
+    # Knowledge management
+    KNOWLEDGE_REPRESENTATION = "knowledge_representation"
+    KNOWLEDGE_ELICITATION = "knowledge_elicitation"
+    KNOWLEDGE_ACQUISITION = "knowledge_acquisition"
+    KNOWLEDGE_ORGANIZATION = "knowledge_organization"
+    KNOWLEDGE_RETRIEVAL = "knowledge_retrieval"
+    KNOWLEDGE_TRANSFER = "knowledge_transfer"
+    KNOWLEDGE_SHARING = "knowledge_sharing"
+    KNOWLEDGE_CREATION = "knowledge_creation"
+    KNOWLEDGE_INTEGRATION = "knowledge_integration"
+    KNOWLEDGE_PRESERVATION = "knowledge_preservation"
+    KNOWLEDGE_EVALUATION = "knowledge_evaluation"
+    KNOWLEDGE_GOVERNANCE = "knowledge_governance"
+    KNOWLEDGE_ECOLOGY = "knowledge_ecology"
+    KNOWLEDGE_COMMONS = "knowledge_commons"
+    KNOWLEDGE_BOUNDARY = "knowledge_boundary"
+    KNOWLEDGE_FLOW = "knowledge_flow"
+    KNOWLEDGE_SPILLOVER = "knowledge_spillover"
+    KNOWLEDGE_BARRIER = "knowledge_barrier"
+    KNOWLEDGE_ABSORPTION = "knowledge_absorption"
+    KNOWLEDGE_ASSIMILATION = "knowledge_assimilation"
+    KNOWLEDGE_TRANSFORMATION = "knowledge_transformation"
+    KNOWLEDGE_EXPLOITATION = "knowledge_exploitation"
+    KNOWLEDGE_EXPLORATION = "knowledge_exploration"
 
 
 class ReasoningStep(BaseModel):
@@ -1209,6 +4138,161 @@ class CognitiveModelingEngine:
                 self.create_reasoning_path(
                     option_path_id, 
                     f"Exploring option: {option}", 
+                    confidence * 0.9  # Slightly lower confidence for options
+                )
+        
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.EXPLORATION,
+            description=f"Exploring strategy: {strategy}",
+            metadata=metadata,
+            confidence=confidence,
+            path=path
+        )
+    
+    def run_multiagent_reasoning(self, scenario: str, agents: List[Dict[str, Any]], 
+                              confidence: float = 0.7, path: str = None) -> ReasoningStep:
+        """
+        Execute multiagent reasoning: model interactions between multiple strategic agents.
+        
+        Args:
+            scenario: Description of the multiagent scenario
+            agents: List of agent descriptions with preferences and capabilities
+            confidence: Confidence in this reasoning
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.MULTIAGENT_REASONING,
+            description=f"Multiagent reasoning in scenario: {scenario}",
+            metadata={"agents": agents},
+            confidence=confidence,
+            path=path
+        )
+    
+    def model_opponent(self, opponent: str, observations: List[str], 
+                     confidence: float = 0.6, path: str = None) -> ReasoningStep:
+        """
+        Execute opponent modeling: infer strategy and preferences of other agents.
+        
+        Args:
+            opponent: The opponent to model
+            observations: List of observed actions or statements
+            confidence: Confidence in this modeling
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.OPPONENT_MODELING,
+            description=f"Modeling opponent: {opponent}",
+            metadata={"observations": observations},
+            confidence=confidence,
+            path=path
+        )
+    
+    def assess_risk(self, action: str, risks: List[Dict[str, Any]], 
+                  confidence: float = 0.7, path: str = None) -> ReasoningStep:
+        """
+        Execute risk assessment: evaluate potential downsides of actions.
+        
+        Args:
+            action: The action being assessed
+            risks: List of risks with probabilities and impacts
+            confidence: Confidence in this assessment
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.RISK_ASSESSMENT,
+            description=f"Assessing risks of: {action}",
+            metadata={"risks": risks},
+            confidence=confidence,
+            path=path
+        )
+    
+    def create_decision_tree(self, decision: str, options: List[Dict[str, Any]], 
+                           confidence: float = 0.8, path: str = None) -> ReasoningStep:
+        """
+        Execute decision tree analysis: map out decision sequences and outcomes.
+        
+        Args:
+            decision: The initial decision point
+            options: List of options with consequences
+            confidence: Confidence in this analysis
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.DECISION_TREE_ANALYSIS,
+            description=f"Creating decision tree for: {decision}",
+            metadata={"options": options},
+            confidence=confidence,
+            path=path
+        )
+    
+    def run_mental_simulation(self, scenario: str, steps: List[str], 
+                           outcome: Optional[str] = None, 
+                           confidence: float = 0.7, path: str = None) -> ReasoningStep:
+        """
+        Execute mental simulation: step through hypothetical scenarios to predict outcomes.
+        
+        Args:
+            scenario: The scenario to simulate
+            steps: Sequential steps in the simulation
+            outcome: Optional predicted outcome
+            confidence: Confidence in this simulation
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        metadata = {"steps": steps}
+        if outcome:
+            metadata["outcome"] = outcome
+            
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.MENTAL_SIMULATION,
+            description=f"Simulating scenario: {scenario}",
+            metadata=metadata,
+            confidence=confidence,
+            path=path
+        )
+    
+    def form_grand_strategy(self, objective: str, timeframe: str, 
+                          components: List[Dict[str, Any]], 
+                          confidence: float = 0.8, path: str = None) -> ReasoningStep:
+        """
+        Execute grand strategy formation: develop a comprehensive long-term plan.
+        
+        Args:
+            objective: The overall strategic objective
+            timeframe: The strategic timeframe
+            components: List of strategic components and their rationales
+            confidence: Confidence in this strategy
+            path: Optional reasoning path identifier
+            
+        Returns:
+            The created reasoning step
+        """
+        return self.add_reasoning_step(
+            behavior=CognitiveBehavior.GRAND_STRATEGY_FORMATION,
+            description=f"Forming grand strategy for: {objective} ({timeframe})",
+            metadata={"components": components},
+            confidence=confidence,
+            path=path
+        )
+            for i, option in enumerate(options):
+                option_path_id = f"option_{i}_{int(time.time())}"
+                self.create_reasoning_path(
+                    option_path_id, 
+                    f"Exploring option: {option}", 
                     confidence * 0.8  # Slightly lower initial confidence for exploration paths
                 )
                 
@@ -1632,8 +4716,185 @@ class SelfReflectiveCognition:
                     logger.info(f"[SelfReflectiveCognition] {reflection}")
 
 ###############################################################################
-# IN-MEMORY CODE ARCHIVE
+# DYNAMIC CODE LOADING AND IN-MEMORY CODE ARCHIVE
 ###############################################################################
+
+class DynamicCodeLoader:
+    """
+    Handles dynamic loading, reloading, and management of code modules.
+    Allows for runtime code changes without restarting the application.
+    """
+    
+    def __init__(self):
+        self._modules = {}
+        self._lock = threading.RLock()
+        self._logger = logging.getLogger("DynamicCodeLoader")
+        self._module_watchers = {}
+        self._last_modified = {}
+        
+    def load_module(self, module_path: str, reload: bool = False) -> types.ModuleType:
+        """
+        Load a Python module dynamically from file path.
+        
+        Args:
+            module_path: Path to the module file
+            reload: Force reload even if previously loaded
+            
+        Returns:
+            Loaded module object
+        """
+        with self._lock:
+            module_path = Path(module_path).resolve()
+            if not module_path.exists():
+                raise FileNotFoundError(f"Module not found: {module_path}")
+            
+            # Check if module needs reloading
+            if module_path in self._modules and not reload:
+                return self._modules[module_path]
+            
+            # Generate module name from path
+            module_name = f"dynamic_module_{hash(str(module_path))}"
+            
+            # Track last modified time
+            self._last_modified[module_path] = module_path.stat().st_mtime
+            
+            try:
+                # Create spec and load module
+                spec = importlib.util.spec_from_file_location(module_name, module_path)
+                if spec is None:
+                    raise ImportError(f"Failed to create spec for module: {module_path}")
+                    
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                
+                # Store the loaded module
+                self._modules[module_path] = module
+                self._logger.info(f"Successfully loaded module from {module_path}")
+                
+                return module
+                
+            except Exception as e:
+                self._logger.error(f"Error loading module {module_path}: {str(e)}")
+                raise
+    
+    def check_for_changes(self) -> List[Path]:
+        """
+        Check all loaded modules for changes since last load.
+        
+        Returns:
+            List of module paths that have changed
+        """
+        changed_modules = []
+        
+        with self._lock:
+            for module_path in self._modules:
+                if not Path(module_path).exists():
+                    continue
+                    
+                current_mtime = Path(module_path).stat().st_mtime
+                if current_mtime > self._last_modified.get(module_path, 0):
+                    changed_modules.append(module_path)
+                    
+        return changed_modules
+    
+    def reload_all_changed(self) -> Dict[Path, Any]:
+        """
+        Reload all modules that have changed.
+        
+        Returns:
+            Dictionary mapping module paths to reload success/failure
+        """
+        changed = self.check_for_changes()
+        results = {}
+        
+        for module_path in changed:
+            try:
+                self.load_module(module_path, reload=True)
+                results[module_path] = True
+            except Exception as e:
+                results[module_path] = str(e)
+                
+        return results
+    
+    def execute_function(self, module_path: str, function_name: str, *args, **kwargs) -> Any:
+        """
+        Execute a function from a dynamically loaded module.
+        
+        Args:
+            module_path: Path to the module file
+            function_name: Name of the function to execute
+            *args, **kwargs: Arguments to pass to the function
+            
+        Returns:
+            Result of function execution
+        """
+        module = self.load_module(module_path)
+        
+        if not hasattr(module, function_name):
+            raise AttributeError(f"Function '{function_name}' not found in module: {module_path}")
+            
+        function = getattr(module, function_name)
+        if not callable(function):
+            raise TypeError(f"'{function_name}' is not callable in module: {module_path}")
+            
+        return function(*args, **kwargs)
+    
+    def get_module_symbols(self, module_path: str) -> Dict[str, str]:
+        """
+        Get all symbols (functions, classes, variables) from a module.
+        
+        Args:
+            module_path: Path to the module file
+            
+        Returns:
+            Dictionary of symbol names to their types
+        """
+        module = self.load_module(module_path)
+        symbols = {}
+        
+        for name, obj in inspect.getmembers(module):
+            # Skip private/dunder names
+            if name.startswith("_"):
+                continue
+                
+            if inspect.isfunction(obj):
+                symbols[name] = "function"
+            elif inspect.isclass(obj):
+                symbols[name] = "class"
+            elif inspect.ismethod(obj):
+                symbols[name] = "method"
+            else:
+                symbols[name] = type(obj).__name__
+                
+        return symbols
+    
+    def clear_module_cache(self) -> None:
+        """Clear the module cache to force fresh reloads."""
+        with self._lock:
+            self._modules.clear()
+            
+    def start_auto_reload(self, check_interval: float = 5.0) -> None:
+        """
+        Start a background thread to automatically reload changed modules.
+        
+        Args:
+            check_interval: Interval in seconds between checks
+        """
+        def _watcher():
+            while True:
+                try:
+                    changed = self.reload_all_changed()
+                    if changed:
+                        self._logger.info(f"Auto-reload: Updated {len(changed)} modules")
+                except Exception as e:
+                    self._logger.error(f"Error in auto-reload: {str(e)}")
+                time.sleep(check_interval)
+                
+        thread = threading.Thread(target=_watcher, daemon=True)
+        thread.start()
+        self._logger.info(f"Started auto-reload thread (interval: {check_interval}s)")
+
 
 class InMemoryCodeArchive:
     """
@@ -4658,15 +7919,50 @@ class R1Agent:
         # Token budget management
         self.token_budget = TokenBudget(initial_budget=8000)
         
-        # Knowledge base
+        # System capabilities detection
+        self.system_capabilities = detect_system_capabilities()
+        logger.info(f"Detected system capabilities: {self.system_capabilities}")
+        
+        # Knowledge base with SQLite for durability
+        self.sqlite_kb = SQLiteKnowledgeBase("./agent.db")
         self.knowledge_base = KnowledgeBase()
-        # Code archive
+        
+        # Code archive and advanced code management
         self.code_archive = InMemoryCodeArchive()
+        # Initialize code manager
+        current_file = os.path.abspath(__file__)
+        self.code_manager = AdvancedCodeManager(current_file)
+        # Initialize dynamic code loader
+        self.dynamic_code_loader = DynamicCodeLoader()
+        # Start automatic code reload
+        self.dynamic_code_loader.start_auto_reload(check_interval=10.0)
+        
         # Action generator (needs code archive, KB)
         self.action_generator = ActionGenerator(
             code_archive=self.code_archive,
             kb=self.knowledge_base
         )
+
+        # Initialize system tools
+        self.system_tools = setup_system_tools(self.system_capabilities)
+        
+        # Initialize Jina client if API key available
+        if "JINA_API_KEY" in os.environ:
+            self.jina_client = JinaClient()
+        else:
+            self.jina_client = None
+            
+        # Initialize RL agents if PyTorch is available
+        if TORCH_AVAILABLE:
+            # Simple example initialization - would be customized in real usage
+            self.rl_agents = {
+                "simple_policy": SimplePolicyAgent(state_dim=10, action_dim=5),
+                "grpo": GRPOAgent(state_dim=10, action_dim=5),
+                "ppo": PPOAgent(state_dim=10, action_dim=5),
+                "trpo": TRPOAgent(state_dim=10, action_dim=5)
+            }
+        else:
+            self.rl_agents = {}
 
         self.function_adapter = FunctionAdapter()
         self.memory_store = TaskMemoryStore()
@@ -4688,6 +7984,17 @@ class R1Agent:
         # Get a direct reference to the cognitive engine for the agent
         self.cognitive_engine = self.reflection.cognitive_engine
         
+        # Set up extraction modules
+        self.extraction_modules = {
+            "intent": self._extract_intent,
+            "entities": self._extract_entities,
+            "sentiment": self._extract_sentiment,
+            "tasks": self._extract_tasks,
+            "code": self._extract_code_elements,
+            "knowledge": self._extract_knowledge,
+            "reflection": self._extract_reflections
+        }
+        
         self.processor = SmartTaskProcessor(
             memory_store=self.memory_store,
             function_adapter=self.function_adapter,
@@ -4702,6 +8009,16 @@ class R1Agent:
             max_workers=4
         )
         self.goal_manager = GoalManager()
+        
+        # Initialize PDF observer if watchdog is available
+        if WATCHDOG_AVAILABLE and PYPDF2_AVAILABLE:
+            self.pdf_observer = Observer()
+            self.pdf_handler = PDFHandler(self)
+            pdf_dir = os.path.abspath("./pdfs")
+            os.makedirs(pdf_dir, exist_ok=True)
+            self.pdf_observer.schedule(self.pdf_handler, pdf_dir, recursive=True)
+            self.pdf_observer.start()
+            logger.info(f"Started PDF observer on directory: {pdf_dir}")
 
         # Plan manager
         self.plan_manager = PlanManager(self)
@@ -4801,6 +8118,166 @@ class R1Agent:
         )
         self.knowledge_base.add_fact("progress visualization",
             "The agent can display progress bars and indicators for long-running operations, enhancing user experience."
+        )
+        
+        # Add vision capabilities knowledge
+        self.knowledge_base.add_fact("vision understanding",
+            "The agent can analyze and understand images using vision models, supporting caption generation and visual question answering."
+        )
+        self.knowledge_base.add_fact("moondream model",
+            "A small but powerful vision language model used for image analysis, capable of running locally with minimal resources."
+        )
+        self.knowledge_base.add_fact("image captioning",
+            "The process of generating descriptive text that captures the content and context of an image."
+        )
+        self.knowledge_base.add_fact("visual question answering",
+            "The ability to answer natural language questions about an image by understanding visual content and reasoning about it."
+        )
+        self.knowledge_base.add_fact("vision encoding",
+            "The process of converting an image into a mathematical representation (embeddings) that machine learning models can process."
+        )
+        self.knowledge_base.add_fact("cloud vision apis",
+            "External vision processing services like OpenAI's GPT-4 Vision and Claude 3 that can analyze images with advanced capabilities."
+        )
+        
+        # Add dynamic code loading knowledge
+        self.knowledge_base.add_fact("dynamic code loading",
+            "The agent can load, reload, and execute Python modules at runtime without restarting, enabling continuous adaptation and extension."
+        )
+        self.knowledge_base.add_fact("hot module reloading",
+            "The ability to detect changes in source files and automatically reload modules with updated code."
+        )
+        self.knowledge_base.add_fact("runtime introspection",
+            "The examination of code structures, symbols, and types during execution to enable dynamic behavior."
+        )
+        self.knowledge_base.add_fact("lazy module loading",
+            "Loading modules only when needed, reducing startup time and memory usage."
+        )
+        self.knowledge_base.add_fact("module dependency tracking",
+            "Identifying and managing dependencies between modules to ensure consistent reloading and execution."
+        )
+        self.knowledge_base.add_fact("code patching",
+            "Modifying function or class behavior at runtime without changing the source code."
+        )
+        
+        # Add advanced reasoning knowledge
+        self.knowledge_base.add_fact("counterfactual reasoning",
+            "Evaluating hypothetical scenarios by considering alternate realities where certain conditions are different."
+        )
+        self.knowledge_base.add_fact("abductive reasoning",
+            "Forming the most likely explanation for observations by making educated guesses based on incomplete information."
+        )
+        self.knowledge_base.add_fact("analogical reasoning",
+            "Solving new problems by drawing parallels to similar situations encountered previously."
+        )
+        self.knowledge_base.add_fact("causal attribution",
+            "Determining causes by distinguishing correlation from causation and analyzing chains of events."
+        )
+        self.knowledge_base.add_fact("mental simulation",
+            "Running virtual scenarios through imagination to predict outcomes and evaluate strategies."
+        )
+        self.knowledge_base.add_fact("model-based reasoning",
+            "Using abstract models that represent key aspects of a system to make predictions and explanations."
+        )
+        
+        # Add multi-agent coordination knowledge
+        self.knowledge_base.add_fact("distributed task allocation",
+            "Assigning tasks to specialized agents based on capabilities, current workload, and task requirements."
+        )
+        self.knowledge_base.add_fact("agent communication protocols",
+            "Structured methods for agents to exchange information, intentions, and coordination signals."
+        )
+        self.knowledge_base.add_fact("shared mental models",
+            "Aligned representations of tasks, goals, and environments that enable agents to predict each other's behavior."
+        )
+        self.knowledge_base.add_fact("consensus mechanisms",
+            "Methods for multiple agents to reach agreement on states, decisions, or plans."
+        )
+        self.knowledge_base.add_fact("coalition formation",
+            "Dynamic grouping of agents for collaborative problem-solving based on goals and capabilities."
+        )
+        self.knowledge_base.add_fact("reputation systems",
+            "Frameworks for tracking reliability and quality of agent contributions to inform future interactions."
+        )
+        
+        # Add game theory knowledge
+        self.knowledge_base.add_fact("nash equilibrium",
+            "A state in which no player can gain advantage by unilaterally changing their strategy, given the strategies of other players."
+        )
+        self.knowledge_base.add_fact("dominant strategy",
+            "A strategy that provides optimal outcomes regardless of the strategies chosen by other players."
+        )
+        self.knowledge_base.add_fact("pareto efficiency",
+            "A state where no player can be made better off without making at least one player worse off."
+        )
+        self.knowledge_base.add_fact("minimax strategy",
+            "A decision rule to minimize the maximum possible loss, particularly useful in zero-sum games."
+        )
+        self.knowledge_base.add_fact("subgame perfect equilibrium",
+            "A refinement of Nash equilibrium that represents a strategy profile containing optimal decisions in every subgame."
+        )
+        self.knowledge_base.add_fact("cooperation dilemma",
+            "A situation where individual rational choices lead to suboptimal outcomes for all participants."
+        )
+        
+        # Add strategic planning knowledge
+        self.knowledge_base.add_fact("scenario planning",
+            "A strategic method involving the creation and analysis of possible future scenarios to prepare for different outcomes."
+        )
+        self.knowledge_base.add_fact("resource allocation",
+            "The strategic distribution of available resources across different objectives to maximize overall utility."
+        )
+        self.knowledge_base.add_fact("opportunity cost",
+            "The value of the next-best alternative foregone when making a decision."
+        )
+        self.knowledge_base.add_fact("first-mover advantage",
+            "Benefits gained by the first actor to enter a market or make a strategic move."
+        )
+        self.knowledge_base.add_fact("information asymmetry",
+            "A situation where one party has more or better information than another, creating potential strategic advantages."
+        )
+        self.knowledge_base.add_fact("commitment problem",
+            "The difficulty of credibly committing to future actions when incentives may change over time."
+        )
+        
+        # Add multiagent strategic behaviors
+        self.knowledge_base.add_fact("coalition formation",
+            "The process by which independent agents come together to achieve common goals through coordinated action."
+        )
+        self.knowledge_base.add_fact("reputation systems",
+            "Mechanisms that track past behavior to inform future interactions, incentivizing cooperation."
+        )
+        self.knowledge_base.add_fact("signaling theory",
+            "The study of how agents with private information credibly communicate that information to influence others' beliefs."
+        )
+        self.knowledge_base.add_fact("mechanism design",
+            "The creation of rules or incentives that lead self-interested agents toward desired collective outcomes."
+        )
+        self.knowledge_base.add_fact("preference aggregation",
+            "Methods for combining individual preferences into collective decisions that satisfy certain fairness criteria."
+        )
+        self.knowledge_base.add_fact("bargaining theory",
+            "The analysis of negotiation processes and outcomes between agents with different interests."
+        )
+        
+        # Add long-term strategic abstractions
+        self.knowledge_base.add_fact("grand strategy",
+            "Comprehensive long-term planning that coordinates all resources toward fundamental objectives."
+        )
+        self.knowledge_base.add_fact("strategic positioning",
+            "The creation of a unique and valuable position involving a different set of activities than rivals."
+        )
+        self.knowledge_base.add_fact("path dependency",
+            "How the set of decisions available in the present is constrained by decisions made in the past."
+        )
+        self.knowledge_base.add_fact("network effects",
+            "The phenomenon where a product or service becomes more valuable as more people use it."
+        )
+        self.knowledge_base.add_fact("strategic uncertainty",
+            "Uncertainty about the strategies, intentions, or capabilities of other actors in a strategic environment."
+        )
+        self.knowledge_base.add_fact("technological forecasting",
+            "Predicting future technological developments and their strategic implications."
         )
 
     def add_goal(self, name: str, description: str, priority: int = 5, 
@@ -5786,6 +9263,579 @@ print(f"Local: {local_date} {local_time} {local_timezone}")
         messages.extend(history)
         return messages
 
+    def _extract_intent(self, text: str) -> Dict[str, Any]:
+        """
+        Extract user intent from text using structured reasoning
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            Dictionary with intent information
+        """
+        # Using cognitive engine for structured reasoning to extract intent
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.ABDUCTIVE_REASONING,
+            description=f"Extracting user intent from: '{text[:50]}...'",
+            confidence=0.85
+        )
+        
+        # Extract potential intents using pattern recognition
+        command_pattern = re.compile(r"^(search|find|get|create|update|delete|analyze|explain|summarize|compare)\s", re.IGNORECASE)
+        question_pattern = re.compile(r"^(who|what|when|where|why|how|is|are|can|could|would|should|do|does)\s", re.IGNORECASE)
+        request_pattern = re.compile(r"^(please|could you|would you|can you|i need|i want)\s", re.IGNORECASE)
+        
+        # Use structured analysis to determine intent
+        match = command_pattern.search(text)
+        if match:
+            intent_type = "command"
+            action = match.group(1).lower()
+        elif question_pattern.search(text):
+            intent_type = "question"
+            if text.lower().startswith(("how to", "how do")):
+                action = "instruction_request"
+            elif text.lower().startswith(("what is", "what are")):
+                action = "definition_request"
+            else:
+                action = "information_request"
+        elif request_pattern.search(text):
+            intent_type = "request"
+            action = "assistance_request"
+        else:
+            # Use more sophisticated analysis for complex intents
+            intent_type = "statement"
+            
+            # Check for specific patterns
+            if "help" in text.lower() or "assist" in text.lower():
+                action = "assistance_request"
+            elif any(keyword in text.lower() for keyword in ["code", "function", "class", "implement"]):
+                action = "code_generation"
+            elif any(keyword in text.lower() for keyword in ["explain", "how does", "why is"]):
+                action = "explanation_request"
+            else:
+                action = "general_statement"
+        
+        intent_result = {
+            "type": intent_type,
+            "action": action,
+            "confidence": 0.85,
+            "extracted_at": datetime.now().isoformat()
+        }
+        
+        # Add reasoning step with the result
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description="Intent extraction complete",
+            result=intent_result,
+            confidence=0.85
+        )
+        
+        return intent_result
+        
+    def _extract_entities(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Extract named entities and key concepts from text
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            Dictionary with categorized entities
+        """
+        # Using cognitive engine for structured reasoning to extract entities
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.ANALYSIS,
+            description=f"Extracting entities from: '{text[:50]}...'",
+            confidence=0.8
+        )
+        
+        entities = {
+            "people": [],
+            "organizations": [],
+            "locations": [],
+            "dates": [],
+            "concepts": [],
+            "technical_terms": [],
+            "code_elements": [],
+        }
+        
+        # Simple pattern matching for common entities
+        # In a production system, this would use NER models or more sophisticated approaches
+        
+        # Match dates (simple patterns)
+        date_patterns = [
+            r"\d{1,2}/\d{1,2}/\d{2,4}",  # MM/DD/YYYY
+            r"\d{1,2}-\d{1,2}-\d{2,4}",  # MM-DD-YYYY
+            r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(st|nd|rd|th)?(,?\s+\d{4})?\b"
+        ]
+        
+        for pattern in date_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                entities["dates"].append({
+                    "text": match.group(0),
+                    "start": match.start(),
+                    "end": match.end(),
+                    "confidence": 0.9
+                })
+        
+        # Technical terms (programming languages, frameworks, etc.)
+        tech_terms = [
+            "Python", "JavaScript", "TypeScript", "Java", "C\\+\\+", "Rust", "Go", "SQL",
+            "React", "Vue", "Angular", "Node.js", "Django", "Flask", "FastAPI",
+            "Docker", "Kubernetes", "AWS", "Azure", "GCP",
+            "API", "REST", "GraphQL", "JSON", "YAML", "XML",
+            "Git", "GitHub", "GitLab", "Bitbucket"
+        ]
+        
+        for term in tech_terms:
+            pattern = r"\b" + term + r"\b"
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                entities["technical_terms"].append({
+                    "text": match.group(0),
+                    "start": match.start(),
+                    "end": match.end(),
+                    "type": "technology",
+                    "confidence": 0.85
+                })
+        
+        # Code elements (function names, class names, etc.)
+        code_patterns = [
+            r"\b[a-zA-Z_][a-zA-Z0-9_]*\(\)",  # function calls
+            r"\bclass\s+[A-Z][a-zA-Z0-9_]*\b",  # class definitions
+            r"\bdef\s+[a-z_][a-zA-Z0-9_]*\b",  # function definitions
+            r"\bimport\s+[a-z_][a-zA-Z0-9_]*\b",  # imports
+            r"\bfrom\s+[a-z_][a-zA-Z0-9_.]*\s+import\b"  # from imports
+        ]
+        
+        for pattern in code_patterns:
+            for match in re.finditer(pattern, text):
+                entities["code_elements"].append({
+                    "text": match.group(0),
+                    "start": match.start(),
+                    "end": match.end(),
+                    "type": "code_element",
+                    "confidence": 0.9
+                })
+        
+        # Add reasoning step with the result
+        num_entities = sum(len(v) for v in entities.values())
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description=f"Entity extraction complete. Found {num_entities} entities.",
+            result={"entity_count": num_entities},
+            confidence=0.8
+        )
+        
+        return entities
+    
+    def _extract_sentiment(self, text: str) -> Dict[str, Any]:
+        """
+        Extract sentiment and emotional tone from text
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            Dictionary with sentiment information
+        """
+        # Using cognitive engine for structured reasoning to extract sentiment
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.ANALYSIS,
+            description=f"Extracting sentiment from: '{text[:50]}...'",
+            confidence=0.7
+        )
+        
+        # Simple rule-based sentiment analysis
+        # In a production system, this would use ML models
+        
+        positive_words = set([
+            "good", "great", "excellent", "amazing", "awesome", "nice", "wonderful",
+            "fantastic", "helpful", "useful", "thank", "thanks", "appreciate", "happy",
+            "pleased", "satisfied", "love", "like", "enjoy"
+        ])
+        
+        negative_words = set([
+            "bad", "terrible", "awful", "horrible", "poor", "useless", "unhelpful",
+            "disappointed", "frustrate", "frustrated", "annoying", "annoyed", "hate",
+            "dislike", "fail", "failed", "issue", "problem", "bug", "error", "wrong"
+        ])
+        
+        urgent_words = set([
+            "urgent", "immediately", "asap", "emergency", "critical", "crucial",
+            "vital", "important", "priority", "deadline", "quick", "quickly"
+        ])
+        
+        # Count positive and negative words
+        words = re.findall(r'\b\w+\b', text.lower())
+        positive_count = sum(1 for word in words if word in positive_words)
+        negative_count = sum(1 for word in words if word in negative_words)
+        urgent_count = sum(1 for word in words if word in urgent_words)
+        
+        # Determine overall sentiment
+        if positive_count > negative_count * 2:
+            sentiment = "very_positive"
+            score = 0.8 + (0.2 * positive_count / (len(words) + 1))
+        elif positive_count > negative_count:
+            sentiment = "positive"
+            score = 0.6 + (0.2 * positive_count / (len(words) + 1))
+        elif negative_count > positive_count * 2:
+            sentiment = "very_negative"
+            score = -0.8 - (0.2 * negative_count / (len(words) + 1))
+        elif negative_count > positive_count:
+            sentiment = "negative"
+            score = -0.6 - (0.2 * negative_count / (len(words) + 1))
+        else:
+            sentiment = "neutral"
+            score = 0.0
+            
+        # Determine urgency
+        urgency = min(1.0, urgent_count / 3)
+        
+        result = {
+            "sentiment": sentiment,
+            "score": max(-1.0, min(1.0, score)),  # Constrain to [-1.0, 1.0]
+            "positive_count": positive_count,
+            "negative_count": negative_count,
+            "urgency": urgency,
+            "confidence": 0.7,
+            "extracted_at": datetime.now().isoformat()
+        }
+        
+        # Add reasoning step with the result
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description=f"Sentiment analysis complete: {sentiment}",
+            result=result,
+            confidence=0.7
+        )
+        
+        return result
+    
+    def _extract_tasks(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract potential tasks from text
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            List of potential tasks
+        """
+        # Using cognitive engine for structured reasoning to extract tasks
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.ANALYSIS,
+            description=f"Extracting tasks from: '{text[:50]}...'",
+            confidence=0.85
+        )
+        
+        # Simple pattern matching for task-like statements
+        tasks = []
+        
+        # Task patterns
+        task_patterns = [
+            r"(?:can you|please|could you)?\s*([^.!?;]+(?:find|search|get|retrieve|fetch|look up|analyze|create|make|build|implement|write|code|develop|generate|update|remove|delete|fix|solve|help)[^.!?;]+)",
+            r"(?:i need|i want|i would like)[^.!?;]+(?:to|for)[^.!?;]+",
+            r"(?:^|\n)(?:\d+\.\s|\-\s|\*\s)([^\n]+)"  # Numbered or bulleted list items
+        ]
+        
+        for pattern in task_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                task_text = match.group(1) if len(match.groups()) > 0 else match.group(0)
+                task_text = task_text.strip()
+                
+                # Determine priority (simple heuristic)
+                priority = 3  # Default priority
+                if any(word in task_text.lower() for word in ["urgent", "asap", "immediately", "critical"]):
+                    priority = 1
+                elif any(word in task_text.lower() for word in ["important", "soon", "priority"]):
+                    priority = 2
+                
+                # Only add if not duplicate
+                if not any(t.get("description") == task_text for t in tasks):
+                    tasks.append({
+                        "description": task_text,
+                        "priority": priority,
+                        "confidence": 0.8,
+                        "extracted_at": datetime.now().isoformat()
+                    })
+        
+        # Add reasoning step with the result
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description=f"Task extraction complete. Found {len(tasks)} tasks.",
+            result={"task_count": len(tasks)},
+            confidence=0.85
+        )
+        
+        return tasks
+    
+    def _extract_code_elements(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Extract code elements and programming constructs from text
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            Dictionary with categorized code elements
+        """
+        # Using cognitive engine for structured reasoning to extract code elements
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.ANALYSIS,
+            description=f"Extracting code elements from: '{text[:50]}...'",
+            confidence=0.9
+        )
+        
+        code_elements = {
+            "functions": [],
+            "classes": [],
+            "variables": [],
+            "imports": [],
+            "code_blocks": []
+        }
+        
+        # Extract code blocks (text between triple backticks)
+        code_block_pattern = r"```(?:python)?\n([\s\S]*?)\n```"
+        for match in re.finditer(code_block_pattern, text):
+            code_block = match.group(1)
+            code_elements["code_blocks"].append({
+                "content": code_block,
+                "start": match.start(),
+                "end": match.end(),
+                "confidence": 0.95
+            })
+            
+            # Parse the code block to extract functions, classes, etc.
+            try:
+                tree = ast.parse(code_block)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef):
+                        code_elements["functions"].append({
+                            "name": node.name,
+                            "line": node.lineno,
+                            "args": [arg.arg for arg in node.args.args],
+                            "confidence": 0.9
+                        })
+                    elif isinstance(node, ast.ClassDef):
+                        code_elements["classes"].append({
+                            "name": node.name,
+                            "line": node.lineno,
+                            "bases": [base.id for base in node.bases if isinstance(base, ast.Name)],
+                            "confidence": 0.9
+                        })
+                    elif isinstance(node, ast.Import):
+                        for name in node.names:
+                            code_elements["imports"].append({
+                                "module": name.name,
+                                "alias": name.asname,
+                                "confidence": 0.95
+                            })
+                    elif isinstance(node, ast.ImportFrom):
+                        for name in node.names:
+                            code_elements["imports"].append({
+                                "module": node.module,
+                                "name": name.name,
+                                "alias": name.asname,
+                                "confidence": 0.95
+                            })
+            except SyntaxError:
+                # If the code block doesn't parse, just ignore
+                pass
+        
+        # Extract inline code elements (text between single backticks)
+        inline_code_pattern = r"`([^`]+)`"
+        for match in re.finditer(inline_code_pattern, text):
+            code = match.group(1)
+            # Try to determine if it's a function, variable, etc.
+            if re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*\(.*\)$", code):
+                code_elements["functions"].append({
+                    "name": code.split("(")[0],
+                    "inline_reference": True,
+                    "confidence": 0.8
+                })
+            elif re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", code):
+                code_elements["variables"].append({
+                    "name": code,
+                    "inline_reference": True,
+                    "confidence": 0.7
+                })
+        
+        # Add reasoning step with the result
+        num_elements = sum(len(v) for v in code_elements.values())
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description=f"Code element extraction complete. Found {num_elements} elements.",
+            result={"element_count": num_elements},
+            confidence=0.9
+        )
+        
+        return code_elements
+    
+    def _extract_knowledge(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract knowledge assertions and facts from text
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            List of knowledge elements
+        """
+        # Using cognitive engine for structured reasoning to extract knowledge
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.ANALYSIS,
+            description=f"Extracting knowledge from: '{text[:50]}...'",
+            confidence=0.8
+        )
+        
+        knowledge_items = []
+        
+        # Pattern for factual statements
+        factual_patterns = [
+            r"([^.!?;]+(?:is|are|was|were|has|have|had|can|could|would|should)[^.!?;]+\.)",
+            r"([^.!?;]+(?:defined as|refers to|means|consists of|contains|includes)[^.!?;]+\.)",
+            r"([^.!?;]+(?:always|never|must|will|won't|cannot|must not)[^.!?;]+\.)"
+        ]
+        
+        for pattern in factual_patterns:
+            for match in re.finditer(pattern, text):
+                fact = match.group(1).strip()
+                # Only add non-trivial facts
+                if len(fact.split()) > 3:
+                    # Try to determine subject and predicate
+                    subject = None
+                    predicate = None
+                    
+                    # Simple heuristic: first noun phrase is subject, rest is predicate
+                    words = fact.split()
+                    for i, word in enumerate(words):
+                        if word.lower() in ["is", "are", "was", "were", "has", "have", "had"]:
+                            subject = " ".join(words[:i])
+                            predicate = " ".join(words[i:])
+                            break
+                    
+                    knowledge_items.append({
+                        "text": fact,
+                        "subject": subject,
+                        "predicate": predicate,
+                        "confidence": 0.75,
+                        "extracted_at": datetime.now().isoformat()
+                    })
+        
+        # Add reasoning step with the result
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description=f"Knowledge extraction complete. Found {len(knowledge_items)} items.",
+            result={"knowledge_count": len(knowledge_items)},
+            confidence=0.8
+        )
+        
+        return knowledge_items
+    
+    def _extract_reflections(self, text: str) -> Dict[str, Any]:
+        """
+        Extract self-reflective statements and meta-cognitive elements
+        
+        Args:
+            text: User input or generated text to analyze
+            
+        Returns:
+            Dictionary with reflective elements
+        """
+        # Using cognitive engine for structured reasoning to extract reflections
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.METACOGNITION,
+            description=f"Extracting reflections from: '{text[:50]}...'",
+            confidence=0.7
+        )
+        
+        reflections = {
+            "self_references": [],
+            "uncertainty_expressions": [],
+            "confidence_expressions": [],
+            "limitations": [],
+            "improvement_suggestions": [],
+            "reasoning_paths": []
+        }
+        
+        # Self-references
+        self_ref_pattern = r"\b(I|my|me|myself|our|we|us)\b"
+        for match in re.finditer(self_ref_pattern, text, re.IGNORECASE):
+            surrounding_text = text[max(0, match.start() - 30):min(len(text), match.end() + 30)]
+            reflections["self_references"].append({
+                "pronoun": match.group(0),
+                "context": surrounding_text,
+                "position": match.start(),
+                "confidence": 0.8
+            })
+        
+        # Uncertainty expressions
+        uncertainty_pattern = r"\b(maybe|perhaps|possibly|might|may|could|unsure|uncertain|not sure|not clear|unclear|don't know|unknown)\b"
+        for match in re.finditer(uncertainty_pattern, text, re.IGNORECASE):
+            surrounding_text = text[max(0, match.start() - 30):min(len(text), match.end() + 30)]
+            reflections["uncertainty_expressions"].append({
+                "expression": match.group(0),
+                "context": surrounding_text,
+                "position": match.start(),
+                "confidence": 0.8
+            })
+        
+        # Confidence expressions
+        confidence_pattern = r"\b(certainly|definitely|sure|confident|know|clearly|obviously|undoubtedly|absolutely|strongly)\b"
+        for match in re.finditer(confidence_pattern, text, re.IGNORECASE):
+            surrounding_text = text[max(0, match.start() - 30):min(len(text), match.end() + 30)]
+            reflections["confidence_expressions"].append({
+                "expression": match.group(0),
+                "context": surrounding_text,
+                "position": match.start(),
+                "confidence": 0.8
+            })
+        
+        # Limitations
+        limitation_pattern = r"\b(limitation|constrain|restrict|cannot|can't|unable|not able|impossible|beyond|outside|limited)\b"
+        for match in re.finditer(limitation_pattern, text, re.IGNORECASE):
+            surrounding_text = text[max(0, match.start() - 30):min(len(text), match.end() + 30)]
+            reflections["limitations"].append({
+                "expression": match.group(0),
+                "context": surrounding_text,
+                "position": match.start(),
+                "confidence": 0.75
+            })
+        
+        # Improvement suggestions
+        improvement_pattern = r"\b(better|improve|enhancement|could be|should be|would be better|recommend|suggestion|advise)\b"
+        for match in re.finditer(improvement_pattern, text, re.IGNORECASE):
+            surrounding_text = text[max(0, match.start() - 30):min(len(text), match.end() + 30)]
+            reflections["improvement_suggestions"].append({
+                "expression": match.group(0),
+                "context": surrounding_text,
+                "position": match.start(),
+                "confidence": 0.7
+            })
+        
+        # Reasoning paths
+        reasoning_pattern = r"\b(first|second|third|finally|then|next|lastly|because|therefore|thus|hence|so|as a result)\b"
+        for match in re.finditer(reasoning_pattern, text, re.IGNORECASE):
+            surrounding_text = text[max(0, match.start() - 30):min(len(text), match.end() + 30)]
+            reflections["reasoning_paths"].append({
+                "marker": match.group(0),
+                "context": surrounding_text,
+                "position": match.start(),
+                "confidence": 0.75
+            })
+        
+        # Add reasoning step with the result
+        num_reflections = sum(len(v) for v in reflections.values())
+        self.cognitive_engine.add_reasoning_step(
+            behavior=CognitiveBehavior.EVALUATION,
+            description=f"Reflection extraction complete. Found {num_reflections} elements.",
+            result={"reflection_count": num_reflections},
+            confidence=0.7
+        )
+        
+        return reflections
+    
     def handle_interactive_command(self, command: str) -> str:
         """
         Handle an interactive command during streaming.
