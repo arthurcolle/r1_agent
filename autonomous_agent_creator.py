@@ -417,6 +417,33 @@ class AgentCreator:
                 dependencies=["openai", "transformers", "nltk"]
             )
             
+            # Chaos Theory Analysis Agent
+            self.create_specialized_template(
+                name="Chaos Theory Analysis Agent",
+                description="An agent specialized in chaos theory analysis and complex systems modeling",
+                capabilities=["nonlinear_dynamics", "bifurcation_analysis", "attractor_identification", "lyapunov_exponents", "fractal_analysis"],
+                specialization="chaos_theory",
+                dependencies=["numpy", "scipy", "matplotlib", "sympy", "networkx"]
+            )
+            
+            # Military Strategy Agent
+            self.create_specialized_template(
+                name="Military Strategy Agent",
+                description="An agent specialized in military strategy analysis, wargaming, and tactical planning",
+                capabilities=["strategic_analysis", "tactical_planning", "force_modeling", "logistics_planning", "threat_assessment", "wargame_simulation"],
+                specialization="military_strategy",
+                dependencies=["numpy", "pandas", "networkx", "matplotlib", "simpy"]
+            )
+            
+            # Anduril Interview Preparation Agent
+            self.create_specialized_template(
+                name="Anduril Interview Preparation Agent",
+                description="An agent specialized in preparing candidates for Anduril Industries interviews with focus on defense technology and engineering challenges",
+                capabilities=["technical_interview_prep", "defense_technology_knowledge", "system_design", "algorithm_coaching", "behavioral_interview_prep", "autonomous_systems_knowledge"],
+                specialization="anduril_interview",
+                dependencies=["numpy", "matplotlib", "networkx", "opencv-python", "pytest"]
+            )
+            
             logger.info(f"Created {len(self.templates)} default templates")
 
 async def main():
