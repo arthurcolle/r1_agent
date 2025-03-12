@@ -10708,6 +10708,7 @@ def execute_shell_command(self, command: str, long_running: bool = False) -> Dic
                 "return_code": -1,
                 "traceback": tb
             }
+            
     def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
         Get comprehensive date and time information, optionally for a specific timezone.
