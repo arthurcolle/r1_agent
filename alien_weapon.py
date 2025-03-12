@@ -4140,6 +4140,17 @@ class CognitiveModelingEngine:
                     f"Exploring option: {option}", 
                     confidence * 0.9  # Slightly lower confidence for options
                 )
+                
+                # Add first step to the new path
+                self.add_reasoning_step(
+                    behavior=CognitiveBehavior.EXPLORATION,
+                    description=f"Exploring option: {option}",
+                    metadata={"strategy": strategy, "option_index": i},
+                    confidence=confidence * 0.8,
+                    path=option_path_id
+                )
+                
+            metadata["created_paths"] = True
         
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.EXPLORATION,
@@ -4288,9 +4299,6 @@ class CognitiveModelingEngine:
             confidence=confidence,
             path=path
         )
-            for i, option in enumerate(options):
-                option_path_id = f"option_{i}_{int(time.time())}"
-                self.create_reasoning_path(
                     option_path_id, 
                     f"Exploring option: {option}", 
                     confidence * 0.8  # Slightly lower initial confidence for exploration paths
