@@ -105,6 +105,17 @@ class CodeDependencyGraph:
             if element in self.reverse_dependencies:
                 del self.reverse_dependencies[element]
 
+class NodeVisitor(ast.NodeVisitor):
+    """Custom AST node visitor that tracks parent-child relationships"""
+    
+    def __init__(self):
+        self.parent_map = {}
+    
+    def visit(self, node):
+        for child in ast.iter_child_nodes(node):
+            self.parent_map[child] = node
+        super().visit(node)
+
 class ASTAnalyzer:
     """Analyzes Python code using AST to extract tokens and dependencies"""
     
@@ -122,6 +133,11 @@ class ASTAnalyzer:
             
             tree = ast.parse(content)
             tokens = {}
+            
+            # Build parent-child relationships
+            visitor = NodeVisitor()
+            visitor.visit(tree)
+            parent_map = visitor.parent_map
             
             # Process imports
             for node in ast.walk(tree):
@@ -207,7 +223,17 @@ class ASTAnalyzer:
                             self.functions[f"{class_name}.{method_name}"] = method_token_id
                             self.dependencies.add_dependency(method_token_id, token_id)
                 
-                elif isinstance(node, ast.FunctionDef) and not any(isinstance(parent, ast.ClassDef) for parent in ast.iter_child_nodes(node)):
+                elif isinstance(node, ast.FunctionDef):
+                    # Check if this function is a method (has a ClassDef parent)
+                    parent = parent_map.get(node)
+                    is_method = False
+                    while parent:
+                        if isinstance(parent, ast.ClassDef):
+                            is_method = True
+                            break
+                        parent = parent_map.get(parent)
+                    
+                    if not is_method:
                     func_name = node.name
                     line_start = node.lineno
                     line_end = max(node.lineno, max([n.lineno for n in ast.walk(node) if hasattr(n, 'lineno')], default=node.lineno))
