@@ -5882,8 +5882,15 @@ class Agent(BaseModel):
         if not self.job_scheduler.running:
             await self.job_scheduler.start()
             
+        # Also ensure persistence timer is running
+        if hasattr(self, '_persistence_timer_started') and not self._persistence_timer_started:
+            await self._start_persistence_timer_async()
+            
     async def start_autonomous_execution(self) -> bool:
         """Start autonomous task execution"""
+        # Ensure job scheduler and persistence timer are running
+        await self.ensure_job_scheduler_running()
+        
         # Enable autonomous mode in task manager
         self.task_manager.enable_autonomous_mode(True)
         
@@ -5994,6 +6001,15 @@ class Agent(BaseModel):
             
     def _start_persistence_timer(self):
         """Start a timer for periodic state persistence"""
+        # We'll start the timer later when we have a running event loop
+        self._persistence_timer_task = None
+        self._persistence_timer_started = False
+        
+    async def _start_persistence_timer_async(self):
+        """Start the persistence timer with a running event loop"""
+        if self._persistence_timer_started:
+            return
+            
         async def persistence_timer():
             while self.persistence_enabled:
                 current_time = time.time()
@@ -6001,8 +6017,9 @@ class Agent(BaseModel):
                     await self._persist_state()
                     self.last_persistence_time = current_time
                 await asyncio.sleep(min(10, self.persistence_interval / 2))
-                
+        
         self._persistence_timer_task = asyncio.create_task(persistence_timer())
+        self._persistence_timer_started = True
         
     async def _persist_state(self):
         """Persist the agent's state to enable work continuity"""
@@ -10126,7 +10143,8 @@ def print_usage():
     print("  python rl_cli.py --scripts ./my_scripts   # Use custom directory for generated scripts")
     print("  python rl_cli.py --mode deep_research     # Start in DEEP_RESEARCH response mode")
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the CLI application"""
     # Check for restart signal
     if check_restart_signal():
         logging.info("Restarting due to code changes...")
@@ -10156,6 +10174,9 @@ if __name__ == "__main__":
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     parser.add_argument('--mode', type=str, choices=['normal', 'web_search', 'web_trawl', 'deep_research', 'deep_task', 'deep_flow'], 
                       default='normal', help='Set initial response mode')
+    
+    # Add command argument for direct command execution
+    parser.add_argument('command', nargs='*', help='Command to execute directly')
     
     # Parse arguments
     args, unknown = parser.parse_known_args()
@@ -10188,6 +10209,9 @@ if __name__ == "__main__":
         cli.agent.self_transformation.script_output_dir = args.scripts
         os.makedirs(args.scripts, exist_ok=True)
         
+        # Start the persistence timer with a running event loop
+        asyncio.run(cli.agent._start_persistence_timer_async())
+        
         # Enable autonomous mode if requested
         if args.autonomous is not None:
             auto_execute_flag = "" if not args.no_execute else "no-execute"
@@ -10202,13 +10226,21 @@ if __name__ == "__main__":
         else:
             asyncio.run(cli.agent.start_reflections())
         
-        # Start dashboard directly if requested
-        if args.dashboard:
-            cli.do_dashboard("")
-        
         # Set initial response mode if specified
         if args.mode:
             asyncio.run(cli.agent.set_response_mode(args.mode))
+            
+        # Check if a direct command was provided
+        if args.command:
+            # Join the command parts and execute it
+            command = ' '.join(args.command)
+            cli.onecmd(command)
+            return
+            
+        # Start dashboard directly if requested
+        if args.dashboard:
+            cli.do_dashboard("")
+            return
         
         # Start CLI
         mode_str = "autonomous mode" if args.autonomous else "standard mode"
@@ -10216,3 +10248,6 @@ if __name__ == "__main__":
         response_mode_str = f", response mode: {cli.agent.response_mode.value}"
         print(f"Starting Agent CLI with {mode_str}{execute_str}{response_mode_str}")
         cli.cmdloop()
+
+if __name__ == "__main__":
+    main()
