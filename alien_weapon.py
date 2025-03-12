@@ -6385,6 +6385,113 @@ token_context = TokenContext(None)
             })
         
         return results if results else None
+        
+    def execute_shell_command(self, command: str, long_running: bool = False) -> Dict[str, Any]:
+        """
+        Execute a shell command with enhanced context awareness.
+        
+        Args:
+            command: Shell command to execute
+            long_running: Whether to run the command in the background
+            
+        Returns:
+            Dictionary with execution results
+        """
+        import subprocess, tempfile, os
+        
+        logger.info(f"[FunctionAdapter] Executing shell command: {command}")
+        
+        try:
+            if long_running:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as temp_file:
+                    temp_file.write(f"#!/bin/bash\n{command}")
+                    temp_file_path = temp_file.name
+                
+                # Make the script executable
+                os.chmod(temp_file_path, 0o755)
+                
+                # Run in background
+                subprocess.Popen(
+                    f"nohup {temp_file_path} > /dev/null 2>&1 &",
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Record execution in context
+                self.execution_context["last_pattern"] = "long_running_shell"
+                self.execution_context["last_command"] = command
+                self.execution_context["temp_file_path"] = temp_file_path
+                
+                return {
+                    "status": "success",
+                    "output": "Command is running in the background",
+                    "temp_file_path": temp_file_path
+                }
+            else:
+                # Run command with timeout
+                process = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30  # 30 second timeout
+                )
+                
+                # Record execution in context
+                self.execution_context["last_pattern"] = "shell_command"
+                self.execution_context["last_command"] = command
+                self.execution_context["last_return_code"] = process.returncode
+                
+                if process.returncode == 0:
+                    self.execution_context["last_output"] = process.stdout
+                    
+                    return {
+                        "status": "success",
+                        "output": process.stdout,
+                        "stderr": process.stderr,
+                        "return_code": process.returncode
+                    }
+                else:
+                    self.execution_context["last_error"] = process.stderr
+                    
+                    return {
+                        "status": "error",
+                        "output": process.stdout,
+                        "stderr": process.stderr,
+                        "return_code": process.returncode
+                    }
+        except subprocess.TimeoutExpired:
+            logger.error(f"[FunctionAdapter] Command timed out: {command}")
+            
+            # Record timeout in context
+            self.execution_context["last_pattern"] = "shell_command"
+            self.execution_context["last_command"] = command
+            self.execution_context["last_error"] = "Command timed out"
+            
+            return {
+                "status": "error",
+                "output": "",
+                "stderr": "Command timed out after 30 seconds",
+                "return_code": -1
+            }
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(f"[FunctionAdapter] Error executing shell command: {e}\n{tb}")
+            
+            # Record error in context
+            self.execution_context["last_pattern"] = "shell_command"
+            self.execution_context["last_command"] = command
+            self.execution_context["last_error"] = str(e)
+            self.execution_context["last_traceback"] = tb
+            
+            return {
+                "status": "error",
+                "output": "",
+                "stderr": str(e),
+                "return_code": -1,
+                "traceback": tb
+            }
 
     def execute_isolated_code(self, code: str, timeout: int = 10, 
                              provide_context: bool = True) -> Dict[str, Any]:
@@ -6643,6 +6750,336 @@ def get_utc_time():
                 "error": str(e),
                 "traceback": tb
             }
+            
+    def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get comprehensive date and time information, optionally for a specific timezone.
+        
+        Args:
+            timezone: Optional timezone name (e.g., 'America/New_York', 'Europe/London')
+                     If None, returns information for UTC and local system time
+        
+        Returns:
+            Dictionary with date and time information
+        """
+        try:
+            # Use direct code execution for more reliable results
+            time_code = """
+import datetime
+import time
+import json
+from zoneinfo import ZoneInfo, available_timezones
+import pytz
+
+# Get current times
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+now_local = datetime.datetime.now()
+
+# Format the times
+result = {
+    "utc": {
+        "datetime": now_utc.isoformat(),
+        "date": now_utc.strftime("%Y-%m-%d"),
+        "time": now_utc.strftime("%H:%M:%S"),
+        "timestamp": time.time(),
+        "timezone": "UTC"
+    },
+    "local": {
+        "datetime": now_local.isoformat(),
+        "date": now_local.strftime("%Y-%m-%d"),
+        "time": now_local.strftime("%H:%M:%S"),
+        "timezone": str(now_local.astimezone().tzname() or time.tzname[0])
+    }
+}
+
+# Add timezone-specific information if requested
+requested_timezone = None
+"""
+            
+            # Add timezone handling if specified
+            if timezone:
+                time_code = time_code.replace('requested_timezone = None', f'requested_timezone = "{timezone}"')
+                time_code += """
+if requested_timezone:
+    try:
+        # Try with ZoneInfo first (Python 3.9+)
+        tz = ZoneInfo(requested_timezone)
+        tz_time = datetime.datetime.now(tz)
+        
+        result["requested_timezone"] = {
+            "datetime": tz_time.isoformat(),
+            "date": tz_time.strftime("%Y-%m-%d"),
+            "time": tz_time.strftime("%H:%M:%S"),
+            "timezone": requested_timezone,
+            "utc_offset": tz_time.strftime("%z")
+        }
+    except (ImportError, KeyError):
+        # Fall back to pytz
+        try:
+            tz = pytz.timezone(requested_timezone)
+            tz_time = datetime.datetime.now(tz)
+            
+            result["requested_timezone"] = {
+                "datetime": tz_time.isoformat(),
+                "date": tz_time.strftime("%Y-%m-%d"),
+                "time": tz_time.strftime("%H:%M:%S"),
+                "timezone": requested_timezone,
+                "utc_offset": tz_time.strftime("%z")
+            }
+        except Exception as e:
+            result["requested_timezone"] = {
+                "error": f"Unknown timezone: {requested_timezone}",
+                "exception": str(e)
+            }
+"""
+            
+            # Add timezone list
+            time_code += """
+# Add available timezones
+try:
+    result["available_timezones"] = list(available_timezones())[:20]  # First 20 for brevity
+    result["available_timezones_count"] = len(available_timezones())
+except ImportError:
+    try:
+        result["available_timezones"] = list(pytz.all_timezones)[:20]  # First 20 for brevity
+        result["available_timezones_count"] = len(pytz.all_timezones)
+    except ImportError:
+        result["available_timezones"] = ["UTC"]
+        result["available_timezones_count"] = 1
+
+# Return the result as JSON
+print(json.dumps(result, default=str))
+result  # For return value
+"""
+            
+            # Execute the code
+            execution_result = self.do_anything(time_code)
+            
+            if execution_result and execution_result.get("status") == "success":
+                # Try to parse the output as JSON
+                import json
+                try:
+                    if "output" in execution_result and execution_result["output"]:
+                        return json.loads(execution_result["output"])
+                    elif "result" in execution_result and execution_result["result"]:
+                        return execution_result["result"]
+                except json.JSONDecodeError:
+                    pass
+            
+            # If execution or parsing failed, fall back to the original implementation
+            raise Exception("Direct execution failed, falling back to manual implementation")
+            
+        except Exception as e:
+            # Fall back to the original implementation if execution fails
+            import datetime
+            import time
+            import pytz
+            from zoneinfo import ZoneInfo, available_timezones
+            
+            result = {
+                "utc": {
+                    "datetime": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+                    "time": datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S"),
+                    "timestamp": time.time(),
+                    "timezone": "UTC"
+                },
+                "local": {
+                    "datetime": datetime.datetime.now().isoformat(),
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                    "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "timezone": str(datetime.datetime.now().astimezone().tzname() or time.tzname[0])
+                },
+                "error": str(e)
+            }
+            
+            # Add timezone-specific information if requested
+            if timezone:
+                try:
+                    # Try with ZoneInfo first (Python 3.9+)
+                    tz = ZoneInfo(timezone)
+                    tz_time = datetime.datetime.now(tz)
+                    
+                    result["requested_timezone"] = {
+                        "datetime": tz_time.isoformat(),
+                        "date": tz_time.strftime("%Y-%m-%d"),
+                        "time": tz_time.strftime("%H:%M:%S"),
+                        "timezone": timezone,
+                        "utc_offset": tz_time.strftime("%z")
+                    }
+                except (ImportError, KeyError):
+                    # Fall back to pytz
+                    try:
+                        tz = pytz.timezone(timezone)
+                        tz_time = datetime.datetime.now(tz)
+                        
+                        result["requested_timezone"] = {
+                            "datetime": tz_time.isoformat(),
+                            "date": tz_time.strftime("%Y-%m-%d"),
+                            "time": tz_time.strftime("%H:%M:%S"),
+                            "timezone": timezone,
+                            "utc_offset": tz_time.strftime("%z")
+                        }
+                    except (pytz.exceptions.UnknownTimeZoneError, ImportError):
+                        result["requested_timezone"] = {
+                            "error": f"Unknown timezone: {timezone}"
+                        }
+            
+            # Add available timezones
+            try:
+                result["available_timezones"] = list(available_timezones())[:20]  # First 20 for brevity
+                result["available_timezones_count"] = len(available_timezones())
+            except ImportError:
+                try:
+                    result["available_timezones"] = list(pytz.all_timezones)[:20]  # First 20 for brevity
+                    result["available_timezones_count"] = len(pytz.all_timezones)
+                except ImportError:
+                    result["available_timezones"] = ["UTC"]
+                    result["available_timezones_count"] = 1
+            
+            return result
+        
+    def execute_datetime_code(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Execute date/time related code in an isolated environment.
+        This provides a more reliable way to get accurate date/time information.
+        
+        Args:
+            timezone: Optional timezone name
+            
+        Returns:
+            Dictionary with date and time information
+        """
+        # Create a simple script to get date/time information
+        script = """
+import datetime
+import time
+import json
+import sys
+
+# Get current times
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+now_local = datetime.datetime.now()
+
+# Format the times
+result = {
+    "utc": {
+        "datetime": now_utc.isoformat(),
+        "date": now_utc.strftime("%Y-%m-%d"),
+        "time": now_utc.strftime("%H:%M:%S"),
+        "timestamp": time.time(),
+        "timezone": "UTC"
+    },
+    "local": {
+        "datetime": now_local.isoformat(),
+        "date": now_local.strftime("%Y-%m-%d"),
+        "time": now_local.strftime("%H:%M:%S"),
+        "timezone": str(now_local.astimezone().tzname() or time.tzname[0])
+    }
+}
+
+# Add timezone-specific information if requested
+requested_timezone = None
+"""
+        
+        # Add timezone handling if specified
+        if timezone:
+            script = script.replace('requested_timezone = None', f'requested_timezone = "{timezone}"')
+            script += """
+if requested_timezone:
+    try:
+        # Try with ZoneInfo first (Python 3.9+)
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(requested_timezone)
+        tz_time = datetime.datetime.now(tz)
+        
+        result["requested_timezone"] = {
+            "datetime": tz_time.isoformat(),
+            "date": tz_time.strftime("%Y-%m-%d"),
+            "time": tz_time.strftime("%H:%M:%S"),
+            "timezone": requested_timezone,
+            "utc_offset": tz_time.strftime("%z")
+        }
+    except (ImportError, KeyError):
+        # Fall back to pytz
+        try:
+            import pytz
+            tz = pytz.timezone(requested_timezone)
+            tz_time = datetime.datetime.now(tz)
+            
+            result["requested_timezone"] = {
+                "datetime": tz_time.isoformat(),
+                "date": tz_time.strftime("%Y-%m-%d"),
+                "time": tz_time.strftime("%H:%M:%S"),
+                "timezone": requested_timezone,
+                "utc_offset": tz_time.strftime("%z")
+            }
+        except Exception as e:
+            result["requested_timezone"] = {
+                "error": f"Unknown timezone: {requested_timezone}",
+                "exception": str(e)
+            }
+"""
+        
+        # Add output
+        script += """
+# Print the result as JSON
+print(json.dumps(result, default=str))
+"""
+        
+        # Execute the script in an isolated environment
+        result = self.execute_isolated_code(script, timeout=5, provide_context=False)
+        
+        # Parse the output as JSON
+        if result and result.get("status") == "success" and result.get("output"):
+            try:
+                import json
+                return json.loads(result["output"])
+            except json.JSONDecodeError:
+                pass
+        
+        # Return a simple error result if execution failed
+        return {
+            "error": "Failed to execute date/time code",
+            "execution_result": result
+        }
+    
+    def get_token_buffer_status(self) -> Dict[str, Any]:
+        """
+        Get the current status of the token buffer.
+        
+        Returns:
+            Dictionary with buffer statistics and context windows
+        """
+        buffer_stats = self.token_registry._buffer.get_stats()
+        
+        # Get context windows
+        context_windows = {}
+        with self.token_registry._buffer._lock:
+            for window_name, window in self.token_registry._buffer._context_windows.items():
+                context_windows[window_name] = {
+                    "start": window["start"],
+                    "size": window["size"],
+                    "text": self.token_registry._buffer.get_context_window(window_name)[:50] + "..."
+                }
+        
+        # Get execution history summary
+        execution_history = self.token_registry.get_execution_history()
+        execution_summary = []
+        for execution in execution_history[-5:]:  # Last 5 executions
+            execution_summary.append({
+                "timestamp": execution["timestamp"],
+                "pattern": execution["pattern"],
+                "matched_text": execution["matched_text"][:30] + "..." if len(execution["matched_text"]) > 30 else execution["matched_text"]
+            })
+        
+        return {
+            "buffer_stats": buffer_stats,
+            "context_windows": context_windows,
+            "buffer_length": len(self.token_registry._buffer),
+            "execution_history": execution_summary,
+            "partial_fragments": len(self.partial_code_fragments)
+        }
 
 ###############################################################################
 # SMART TASK PROCESSOR
