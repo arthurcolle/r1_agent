@@ -6754,7 +6754,7 @@ def get_utc_time():
                 "traceback": tb
             }
             
-def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+    def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
         Get comprehensive date and time information, optionally for a specific timezone.
         
@@ -10709,7 +10709,7 @@ def execute_shell_command(self, command: str, long_running: bool = False) -> Dic
                 "traceback": tb
             }
             
-    def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
         Get comprehensive date and time information, optionally for a specific timezone.
         
