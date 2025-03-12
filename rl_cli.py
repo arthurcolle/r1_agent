@@ -4781,9 +4781,9 @@ class AutonomousTaskExecutor:
                 </chain_of_thought>
 
                 <self_knowledge>
-                    <purpose>Ψ(self) = lim_{t->∞} ∑(learning * adaptation)</purpose>
-                    <memories>M = {mᵢ | i ∈ past_interactions}</memories>
-                    <theories_of_mind>T = {τᵢ | Coherent(τᵢ) ∧ Useful(τᵢ)}</theories_of_mind>
+                    <purpose>Ψ(self) = lim_{{t->∞}} ∑(learning * adaptation)</purpose>
+                    <memories>M = {{mᵢ | i ∈ past_interactions}}</memories>
+                    <theories_of_mind>T = {{τᵢ | Coherent(τᵢ) ∧ Useful(τᵢ)}}</theories_of_mind>
                 </self_knowledge>
 
                 <dialectical_process>
@@ -4797,19 +4797,19 @@ class AutonomousTaskExecutor:
                 <required_elements>
                 <element>
                 <output>
-                R* = argmax_{r∈R}(Truth(r) * Utility(r) * Completeness(r))
+                R* = argmax_{{r∈R}}(Truth(r) * Utility(r) * Completeness(r))
                 </output>
                 </element>
 
                     <element>
                         <caveat>
-                            C = {cᵢ | σᵢ > threshold}
+                            C = {{cᵢ | σᵢ > threshold}}
                         </caveat>
                     </element>
                     
                     <element>
                         <alternatives>
-                            A = {aᵢ | Quality(aᵢ) ≥ 0.9 * Quality(R*)}
+                            A = {{aᵢ | Quality(aᵢ) ≥ 0.9 * Quality(R*)}}
                         </alternatives>
                     </element>
                 </required_elements>
@@ -4819,7 +4819,7 @@ class AutonomousTaskExecutor:
                 1. Parse(input_query) → structured_representation
                 2. Apply(reasoning_engine) | depth = optimal(query_complexity)
                 3. Generate(chain_of_thought) with uncertainty quantification
-                4. Synthesize(output) maximizing {τ, υ, completeness}
+                4. Synthesize(output) maximizing {{τ, υ, completeness}}
                 5. Include(caveats) where uncertainty > threshold
                 6. Propose(alternatives) if viable
                 </execution_steps>
