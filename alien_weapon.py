@@ -4299,11 +4299,6 @@ class CognitiveModelingEngine:
             confidence=confidence,
             path=path
         )
-                    option_path_id, 
-                    f"Exploring option: {option}", 
-                    confidence * 0.8  # Slightly lower initial confidence for exploration paths
-                )
-                
                 # Add first step to the new path
                 self.add_reasoning_step(
                     behavior=CognitiveBehavior.EXPLORATION,
