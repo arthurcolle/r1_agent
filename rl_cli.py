@@ -7703,7 +7703,7 @@ class AgentCLI(cmd.Cmd):
                 
                 # Temporarily set to DEEP_TASK mode for better script generation
                 original_mode = self.agent.response_mode
-                await self.agent.set_response_mode(ResponseMode.DEEP_TASK)
+                asyncio.run(self.agent.set_response_mode(ResponseMode.DEEP_TASK))
                 
                 response = asyncio.run(self.agent.qa(self.current_conversation, prompt))
                 
