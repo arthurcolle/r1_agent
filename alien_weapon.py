@@ -6754,7 +6754,7 @@ def get_utc_time():
                 "traceback": tb
             }
             
-    def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+def get_datetime_info(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
         Get comprehensive date and time information, optionally for a specific timezone.
         
@@ -6942,7 +6942,7 @@ result  # For return value
             
             return result
         
-    def execute_datetime_code(self, timezone: Optional[str] = None) -> Dict[str, Any]:
+def execute_datetime_code(self, timezone: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute date/time related code in an isolated environment.
         This provides a more reliable way to get accurate date/time information.
@@ -7047,7 +7047,7 @@ print(json.dumps(result, default=str))
             "execution_result": result
         }
     
-    def get_token_buffer_status(self) -> Dict[str, Any]:
+def get_token_buffer_status(self) -> Dict[str, Any]:
         """
         Get the current status of the token buffer.
         
@@ -10601,7 +10601,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-    def execute_shell_command(self, command: str, long_running: bool = False) -> Dict[str, Any]:
+
+def execute_shell_command(self, command: str, long_running: bool = False) -> Dict[str, Any]:
         """
         Execute a shell command with enhanced context awareness.
         
