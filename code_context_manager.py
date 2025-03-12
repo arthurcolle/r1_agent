@@ -207,7 +207,7 @@ class ASTAnalyzer:
                             self.functions[f"{class_name}.{method_name}"] = method_token_id
                             self.dependencies.add_dependency(method_token_id, token_id)
                 
-                elif isinstance(node, ast.FunctionDef) and not isinstance(node.parent, ast.ClassDef):
+                elif isinstance(node, ast.FunctionDef) and not any(isinstance(parent, ast.ClassDef) for parent in ast.iter_child_nodes(node)):
                     func_name = node.name
                     line_start = node.lineno
                     line_end = max(node.lineno, max([n.lineno for n in ast.walk(node) if hasattr(n, 'lineno')], default=node.lineno))
@@ -321,42 +321,86 @@ class CodeContextManager:
         """Scan the repository and index all code files"""
         logger.info(f"Scanning repository: {self.repo_path}")
         
-        for root, dirs, files in os.walk(self.repo_path):
-            # Skip excluded directories
-            dirs[:] = [d for d in dirs if d not in self.excluded_dirs]
-            
-            for file in files:
-                if any(file.endswith(pattern.replace("*", "")) for pattern in self.preload_patterns):
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, self.repo_path)
-                    
-                    # Skip files in excluded directories
-                    if any(excluded in rel_path.split(os.sep) for excluded in self.excluded_dirs):
+        try:
+            for root, dirs, files in os.walk(self.repo_path):
+                # Skip excluded directories
+                dirs[:] = [d for d in dirs if d not in self.excluded_dirs]
+                
+                for file in files:
+                    try:
+                        # Check if file matches any of our patterns
+                        if any(pattern.replace("*", "") in file for pattern in self.preload_patterns):
+                            file_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(file_path, self.repo_path)
+                            
+                            # Skip files in excluded directories
+                            if any(excluded in rel_path.split(os.sep) for excluded in self.excluded_dirs):
+                                continue
+                            
+                            # Track file modification time
+                            self.file_mtimes[file_path] = os.path.getmtime(file_path)
+                            
+                            # Parse Python files with AST
+                            if file.endswith('.py'):
+                                self._parse_python_file(file_path)
+                            else:
+                                # For non-Python files, just store the content as a single token
+                                self._parse_generic_file(file_path)
+                    except Exception as e:
+                        logger.error(f"Error processing file {file}: {str(e)}")
                         continue
-                    
-                    # Track file modification time
-                    self.file_mtimes[file_path] = os.path.getmtime(file_path)
-                    
-                    # Parse Python files with AST
-                    if file.endswith('.py'):
-                        self._parse_python_file(file_path)
-                    else:
-                        # For non-Python files, just store the content as a single token
-                        self._parse_generic_file(file_path)
+        except Exception as e:
+            logger.error(f"Error scanning repository: {str(e)}")
+            traceback.print_exc()
         
         logger.info(f"Repository scan complete. Indexed {len(self.tokens)} tokens from {len(self.file_tokens)} files")
     
     def _parse_python_file(self, file_path: str):
         """Parse a Python file and extract tokens"""
-        tokens = self.ast_analyzer.parse_file(file_path)
-        
-        with self.token_lock:
-            for token_id, token in tokens.items():
+        try:
+            tokens = self.ast_analyzer.parse_file(file_path)
+            
+            with self.token_lock:
+                for token_id, token in tokens.items():
+                    self.tokens[token_id] = token
+                    self.file_tokens[file_path].append(token_id)
+                    
+                    # Initialize importance score
+                    self.token_importance[token_id] = 1.0
+                    
+            # If we couldn't extract any tokens but the file exists, create a fallback token
+            if not tokens and os.path.exists(file_path):
+                self._create_fallback_token(file_path)
+                
+        except Exception as e:
+            logger.error(f"Error in _parse_python_file for {file_path}: {str(e)}")
+            # Create a fallback token for the file
+            self._create_fallback_token(file_path)
+    
+    def _create_fallback_token(self, file_path: str):
+        """Create a fallback token for a file that couldn't be parsed properly"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Create a token for the entire file
+            token_id = f"{file_path}:content"
+            token = CodeToken(
+                content=content,
+                file_path=file_path,
+                line_start=1,
+                line_end=content.count('\n') + 1,
+                token_type="file_content"
+            )
+            
+            with self.token_lock:
                 self.tokens[token_id] = token
                 self.file_tokens[file_path].append(token_id)
-                
-                # Initialize importance score
                 self.token_importance[token_id] = 1.0
+                
+            logger.info(f"Created fallback token for {file_path}")
+        except Exception as e:
+            logger.error(f"Error creating fallback token for {file_path}: {str(e)}")
     
     def _parse_generic_file(self, file_path: str):
         """Parse a non-Python file as a single token"""
@@ -596,25 +640,30 @@ class CodeContextManager:
                                 del self.file_mtimes[file_path]
                             if file_path in self.file_hashes:
                                 del self.file_hashes[file_path]
+                    except Exception as e:
+                        logger.error(f"Error checking file {file_path}: {str(e)}")
                 
                 # Reparse changed files
                 for file_path in changed_files:
                     logger.info(f"File changed: {file_path}")
                     
-                    # Remove old tokens for this file
-                    with self.token_lock:
-                        for token_id in self.file_tokens.get(file_path, []):
-                            if token_id in self.tokens:
-                                del self.tokens[token_id]
+                    try:
+                        # Remove old tokens for this file
+                        with self.token_lock:
+                            for token_id in self.file_tokens.get(file_path, []):
+                                if token_id in self.tokens:
+                                    del self.tokens[token_id]
+                            
+                            # Clear file tokens list
+                            self.file_tokens[file_path] = []
                         
-                        # Clear file tokens list
-                        self.file_tokens[file_path] = []
-                    
-                    # Reparse the file
-                    if file_path.endswith('.py'):
-                        self._parse_python_file(file_path)
-                    else:
-                        self._parse_generic_file(file_path)
+                        # Reparse the file
+                        if file_path.endswith('.py'):
+                            self._parse_python_file(file_path)
+                        else:
+                            self._parse_generic_file(file_path)
+                    except Exception as e:
+                        logger.error(f"Error reparsing changed file {file_path}: {str(e)}")
                 
                 # Sleep before next check
                 await asyncio.sleep(5)  # Check every 5 seconds
@@ -623,6 +672,7 @@ class CodeContextManager:
                 break
             except Exception as e:
                 logger.error(f"Error in file watch task: {str(e)}")
+                traceback.print_exc()  # Print full traceback for debugging
                 await asyncio.sleep(5)  # Wait before retrying
     
     def search_code(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
