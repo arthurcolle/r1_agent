@@ -3,7 +3,8 @@
 Shell Command Execution Tool
 
 This module provides enhanced shell command execution capabilities for the agent,
-allowing it to run system commands and process their output.
+allowing it to run system commands and process their output with recursive task
+decomposition and goal-oriented planning.
 """
 
 import os
@@ -12,8 +13,159 @@ import subprocess
 import shlex
 import asyncio
 import logging
-from typing import Dict, List, Any, Optional, Union
+import uuid
+from typing import Dict, List, Any, Optional, Union, Callable
 from datetime import datetime
+
+class TaskNode:
+    """
+    Represents a node in the task execution tree.
+    Each node can have a parent task and multiple child tasks,
+    forming a hierarchical structure for complex command execution.
+    """
+    
+    def __init__(self, task_id: str, command: str, description: str = "", 
+                parent_id: Optional[str] = None):
+        """
+        Initialize a task node
+        
+        Args:
+            task_id: Unique identifier for this task
+            command: The shell command to execute
+            description: Human-readable description of the task
+            parent_id: ID of the parent task, if any
+        """
+        self.task_id = task_id
+        self.command = command
+        self.description = description
+        self.parent_id = parent_id
+        self.child_ids = []
+        self.status = "PENDING"  # PENDING, IN_PROGRESS, COMPLETED, FAILED
+        self.result = None
+        self.created_at = datetime.now()
+        self.started_at = None
+        self.completed_at = None
+        self.execution_time = None
+    
+    def add_child(self, child_id: str) -> None:
+        """Add a child task to this node"""
+        self.child_ids.append(child_id)
+    
+    def start(self) -> None:
+        """Mark the task as started"""
+        self.status = "IN_PROGRESS"
+        self.started_at = datetime.now()
+    
+    def complete(self, result: Dict[str, Any]) -> None:
+        """Mark the task as completed with results"""
+        self.status = "COMPLETED" if result.get("success", False) else "FAILED"
+        self.result = result
+        self.completed_at = datetime.now()
+        if self.started_at:
+            self.execution_time = (self.completed_at - self.started_at).total_seconds()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the task node to a dictionary"""
+        return {
+            "task_id": self.task_id,
+            "command": self.command,
+            "description": self.description,
+            "parent_id": self.parent_id,
+            "child_ids": self.child_ids,
+            "status": self.status,
+            "result": self.result,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "execution_time": self.execution_time
+        }
+
+
+class TaskExecutionTree:
+    """
+    Manages a tree of task nodes representing the hierarchical decomposition
+    of complex commands into simpler subtasks.
+    """
+    
+    def __init__(self):
+        """Initialize the task execution tree"""
+        self.tasks = {}  # task_id -> TaskNode
+        self.root_tasks = []  # List of root task IDs
+    
+    def create_task(self, command: str, description: str = "", 
+                   parent_id: Optional[str] = None) -> str:
+        """
+        Create a new task in the execution tree
+        
+        Args:
+            command: The shell command to execute
+            description: Human-readable description of the task
+            parent_id: ID of the parent task, if any
+            
+        Returns:
+            The ID of the newly created task
+        """
+        task_id = str(uuid.uuid4())
+        task = TaskNode(task_id, command, description, parent_id)
+        self.tasks[task_id] = task
+        
+        if parent_id:
+            if parent_id in self.tasks:
+                self.tasks[parent_id].add_child(task_id)
+        else:
+            self.root_tasks.append(task_id)
+            
+        return task_id
+    
+    def get_task(self, task_id: str) -> Optional[TaskNode]:
+        """Get a task by its ID"""
+        return self.tasks.get(task_id)
+    
+    def get_children(self, task_id: str) -> List[TaskNode]:
+        """Get all child tasks for a given task ID"""
+        task = self.tasks.get(task_id)
+        if not task:
+            return []
+        return [self.tasks[child_id] for child_id in task.child_ids if child_id in self.tasks]
+    
+    def get_subtree(self, task_id: str) -> Dict[str, Any]:
+        """
+        Get a dictionary representation of a subtree rooted at the given task ID
+        
+        Args:
+            task_id: Root task ID for the subtree
+            
+        Returns:
+            Dictionary representation of the subtree
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return {}
+            
+        result = task.to_dict()
+        result["children"] = [self.get_subtree(child_id) for child_id in task.child_ids]
+        return result
+    
+    def get_full_tree(self) -> List[Dict[str, Any]]:
+        """Get the full execution tree as a list of dictionaries"""
+        return [self.get_subtree(task_id) for task_id in self.root_tasks]
+    
+    def update_task_status(self, task_id: str, status: str) -> bool:
+        """Update the status of a task"""
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+        task.status = status
+        return True
+    
+    def complete_task(self, task_id: str, result: Dict[str, Any]) -> bool:
+        """Mark a task as completed with results"""
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+        task.complete(result)
+        return True
+
 
 class ShellCommandTool:
     """
@@ -23,6 +175,8 @@ class ShellCommandTool:
     - Output formatting
     - Error handling
     - Resource usage tracking
+    - Recursive task decomposition
+    - Goal-oriented planning
     """
     
     def __init__(self, working_dir: Optional[str] = None, timeout: int = 30):
@@ -37,6 +191,7 @@ class ShellCommandTool:
         self.default_timeout = timeout
         self.command_history = []
         self.max_history = 100
+        self.execution_tree = TaskExecutionTree()
         
     async def execute(self, command: str, timeout: Optional[int] = None, 
                     capture_output: bool = True) -> Dict[str, Any]:
@@ -268,6 +423,133 @@ class ShellCommandTool:
                 break
                 
         return results
+    
+    async def execute_task(self, task_id: str) -> Dict[str, Any]:
+        """
+        Execute a specific task by its ID
+        
+        Args:
+            task_id: ID of the task to execute
+            
+        Returns:
+            Execution result dictionary
+        """
+        task = self.execution_tree.get_task(task_id)
+        if not task:
+            return {
+                "success": False,
+                "error": f"Task with ID {task_id} not found"
+            }
+        
+        # Mark task as started
+        task.start()
+        
+        # Execute the command
+        result = await self.execute(task.command)
+        
+        # Update task with result
+        self.execution_tree.complete_task(task_id, result)
+        
+        return result
+    
+    async def create_and_execute_task(self, command: str, description: str = "",
+                                    parent_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Create a new task and execute it immediately
+        
+        Args:
+            command: Shell command to execute
+            description: Human-readable description of the task
+            parent_id: ID of the parent task, if any
+            
+        Returns:
+            Dictionary containing task ID and execution result
+        """
+        task_id = self.execution_tree.create_task(command, description, parent_id)
+        result = await self.execute_task(task_id)
+        
+        return {
+            "task_id": task_id,
+            "result": result
+        }
+    
+    async def decompose_and_execute(self, goal: str, 
+                                  decomposition_func: Callable[[str], List[Dict[str, Any]]],
+                                  sequential: bool = True) -> Dict[str, Any]:
+        """
+        Decompose a high-level goal into subtasks and execute them
+        
+        Args:
+            goal: High-level goal description
+            decomposition_func: Function that takes a goal and returns a list of subtasks
+                                Each subtask should be a dict with 'command' and 'description' keys
+            sequential: Whether to execute subtasks sequentially or in parallel
+            
+        Returns:
+            Dictionary containing execution results and task tree
+        """
+        # Create the root task for the goal
+        root_task_id = self.execution_tree.create_task("", goal)
+        
+        # Decompose the goal into subtasks
+        subtasks = decomposition_func(goal)
+        
+        # Create task nodes for each subtask
+        subtask_ids = []
+        for subtask in subtasks:
+            task_id = self.execution_tree.create_task(
+                subtask["command"],
+                subtask.get("description", ""),
+                root_task_id
+            )
+            subtask_ids.append(task_id)
+        
+        # Execute the subtasks
+        results = []
+        if sequential:
+            # Execute sequentially
+            for task_id in subtask_ids:
+                result = await self.execute_task(task_id)
+                results.append(result)
+                
+                # Stop on failure if needed
+                if not result["success"]:
+                    break
+        else:
+            # Execute in parallel
+            tasks = [self.execute_task(task_id) for task_id in subtask_ids]
+            results = await asyncio.gather(*tasks)
+        
+        # Update the root task status based on subtask results
+        all_succeeded = all(result["success"] for result in results)
+        self.execution_tree.complete_task(root_task_id, {
+            "success": all_succeeded,
+            "subtask_count": len(subtasks),
+            "successful_subtasks": sum(1 for result in results if result["success"])
+        })
+        
+        return {
+            "goal": goal,
+            "success": all_succeeded,
+            "root_task_id": root_task_id,
+            "subtask_results": results,
+            "task_tree": self.execution_tree.get_subtree(root_task_id)
+        }
+    
+    def get_task_tree(self, task_id: Optional[str] = None) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        """
+        Get the task execution tree or a specific subtree
+        
+        Args:
+            task_id: ID of the root task for the subtree (None for full tree)
+            
+        Returns:
+            Dictionary or list of dictionaries representing the task tree
+        """
+        if task_id:
+            return self.execution_tree.get_subtree(task_id)
+        else:
+            return self.execution_tree.get_full_tree()
     
     async def execute_with_live_output(self, command: str, 
                                      timeout: Optional[int] = None) -> Dict[str, Any]:
@@ -542,6 +824,62 @@ async def list_files_with_details(directory: str = ".", pattern: str = "*") -> D
             "directory": directory
         }
 
+# Function to decompose and execute a complex goal
+async def execute_complex_goal(goal: str, subtasks: List[Dict[str, Any]], 
+                             sequential: bool = True) -> Dict[str, Any]:
+    """
+    Decompose and execute a complex goal with multiple subtasks
+    
+    Args:
+        goal: High-level goal description
+        subtasks: List of subtask dictionaries, each with 'command' and 'description' keys
+        sequential: Whether to execute subtasks sequentially or in parallel
+        
+    Returns:
+        Dict containing execution results and task tree
+    """
+    def decompose_func(g: str) -> List[Dict[str, Any]]:
+        return subtasks
+    
+    return await shell_tool.decompose_and_execute(goal, decompose_func, sequential)
+
+# Function to create a file processing pipeline
+async def process_files(directory: str, file_pattern: str, 
+                      processing_command: str) -> Dict[str, Any]:
+    """
+    Create and execute a file processing pipeline
+    
+    Args:
+        directory: Directory containing files to process
+        file_pattern: Pattern to match files (e.g., "*.txt")
+        processing_command: Command template to process each file (use {} for filename)
+        
+    Returns:
+        Dict containing execution results
+    """
+    # Define the goal decomposition
+    def decompose_file_processing(goal: str) -> List[Dict[str, Any]]:
+        subtasks = [
+            {
+                "command": f"find {directory} -name '{file_pattern}' -type f",
+                "description": f"Find files matching pattern '{file_pattern}' in {directory}"
+            },
+            {
+                "command": f"for file in $(find {directory} -name '{file_pattern}' -type f); do {processing_command.format('$file')}; done",
+                "description": f"Process each matching file with command: {processing_command}"
+            },
+            {
+                "command": f"echo 'Processing complete for {file_pattern} files in {directory}'",
+                "description": "Confirm processing completion"
+            }
+        ]
+        return subtasks
+    
+    return await shell_tool.decompose_and_execute(
+        f"Process {file_pattern} files in {directory} with command: {processing_command}",
+        decompose_file_processing
+    )
+
 if __name__ == "__main__":
     # Example usage
     async def main():
@@ -561,6 +899,31 @@ if __name__ == "__main__":
         print("\nExecuting with live output:")
         live_result = await shell_tool.execute_with_live_output("find . -type f | head -10")
         print(f"\nCommand completed with status: {live_result['success']}")
+        
+        # Example of task decomposition and goal-oriented execution
+        print("\nExecuting a complex goal with task decomposition:")
+        goal_result = await execute_complex_goal(
+            "Count and analyze Python files in the current directory",
+            [
+                {
+                    "command": "find . -name '*.py' | wc -l",
+                    "description": "Count Python files"
+                },
+                {
+                    "command": "find . -name '*.py' -exec wc -l {} \\; | sort -nr | head -5",
+                    "description": "Find the 5 largest Python files by line count"
+                },
+                {
+                    "command": "find . -name '*.py' -exec grep -l 'import' {} \\; | wc -l",
+                    "description": "Count Python files that import other modules"
+                }
+            ]
+        )
+        
+        print(f"Complex goal execution completed with status: {goal_result['success']}")
+        print("Task tree structure:")
+        import json
+        print(json.dumps(goal_result['task_tree'], indent=2))
     
     if sys.platform != "win32":
         asyncio.run(main())
