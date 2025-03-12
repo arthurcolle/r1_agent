@@ -212,6 +212,50 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
     # Command execution
     tools["run_command"] = lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True)
     
+    # Parallel command execution
+    async def run_commands_parallel(commands: List[str]) -> List[Dict[str, Any]]:
+        """Run multiple shell commands in parallel and return their results."""
+        async def _run_cmd(cmd):
+            try:
+                process = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                return {
+                    "command": cmd,
+                    "exit_code": process.returncode,
+                    "stdout": stdout.decode('utf-8', errors='replace'),
+                    "stderr": stderr.decode('utf-8', errors='replace'),
+                    "success": process.returncode == 0
+                }
+            except Exception as e:
+                return {
+                    "command": cmd,
+                    "error": str(e),
+                    "success": False
+                }
+                
+        tasks = [_run_cmd(cmd) for cmd in commands]
+        return await asyncio.gather(*tasks)
+    
+    tools["run_commands_parallel"] = run_commands_parallel
+    
+    # Register the parallel command execution tool
+    register_tool(
+        name="run_commands_parallel",
+        func=run_commands_parallel,
+        description="Run multiple shell commands in parallel and return their results",
+        parameters={
+            "commands": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of shell commands to execute in parallel"
+            }
+        }
+    )
+    
     # Web operations if requests is available
     if "requests" in sys.modules:
         tools["web_get"] = lambda url: requests.get(url).text
@@ -7470,6 +7514,232 @@ class AgentCLI(cmd.Cmd):
             # Check memory code stats
             code_manager = self.agent.self_transformation.code_manager
             memory_files = len(code_manager.memory_code)
+            
+        def do_server(self, arg):
+            """Start a server with specified configuration.
+            
+            Usage: server <server_type> [options]
+            
+            Server types:
+              http      - Basic HTTP server (specify port with --port)
+              fastapi   - FastAPI server (specify port with --port)
+              jupyter   - Jupyter notebook server
+              
+            Examples:
+              server http --port 8000 --directory ./static
+              server fastapi --port 8080 --reload
+              server jupyter --port 8888
+            """
+            if not arg:
+                print("Please specify a server type. Use 'help server' for usage details.")
+                return
+                
+            args = shlex.split(arg)
+            if not args:
+                print("Please specify server type and options.")
+                return
+                
+            server_type = args[0].lower()
+            server_args = args[1:] if len(args) > 1 else []
+            
+            try:
+                if server_type == "http":
+                    # Parse arguments
+                    parser = argparse.ArgumentParser()
+                    parser.add_argument("--port", type=int, default=8000)
+                    parser.add_argument("--directory", type=str, default=".")
+                    server_options = parser.parse_args(server_args)
+                    
+                    # Build command
+                    cmd = f"python -m http.server {server_options.port} --directory {server_options.directory}"
+                    print(f"Starting HTTP server on port {server_options.port} serving {server_options.directory}...")
+                    
+                    # Run in subprocess to keep CLI responsive
+                    subprocess.Popen(cmd, shell=True)
+                    print(f"Server running at http://localhost:{server_options.port}/")
+                    
+                elif server_type == "fastapi":
+                    # Parse arguments
+                    parser = argparse.ArgumentParser()
+                    parser.add_argument("--port", type=int, default=8000)
+                    parser.add_argument("--host", type=str, default="127.0.0.1")
+                    parser.add_argument("--reload", action="store_true")
+                    parser.add_argument("--app", type=str, default="app:app")
+                    server_options = parser.parse_args(server_args)
+                    
+                    # Build command
+                    reload_flag = "--reload" if server_options.reload else ""
+                    cmd = f"uvicorn {server_options.app} --host {server_options.host} --port {server_options.port} {reload_flag}"
+                    print(f"Starting FastAPI server on {server_options.host}:{server_options.port}...")
+                    
+                    # Run in subprocess to keep CLI responsive
+                    subprocess.Popen(cmd, shell=True)
+                    print(f"API server running at http://{server_options.host}:{server_options.port}/")
+                    
+                elif server_type == "jupyter":
+                    # Parse arguments
+                    parser = argparse.ArgumentParser()
+                    parser.add_argument("--port", type=int, default=8888)
+                    parser.add_argument("--no-browser", action="store_true")
+                    server_options = parser.parse_args(server_args)
+                    
+                    # Build command
+                    browser_flag = "--no-browser" if server_options.no_browser else ""
+                    cmd = f"jupyter notebook --port={server_options.port} {browser_flag}"
+                    print(f"Starting Jupyter notebook server on port {server_options.port}...")
+                    
+                    # Run in subprocess to keep CLI responsive
+                    subprocess.Popen(cmd, shell=True)
+                    print(f"Jupyter server running. Check terminal output for access URL.")
+                    
+                else:
+                    print(f"Unknown server type: {server_type}")
+                    print("Available types: http, fastapi, jupyter")
+            except Exception as e:
+                print(f"Error starting server: {e}")
+                traceback.print_exc()
+                
+        def do_run_sequence(self, arg):
+            """Run a sequence of system commands, one after another.
+            
+            Usage: run_sequence <command1> ; <command2> ; ... ; <commandN>
+            
+            Examples:
+              run_sequence mkdir -p temp ; touch temp/test.txt ; ls -la temp
+              run_sequence git status ; git add . ; git commit -m "Update files"
+            """
+            if not arg:
+                print("Please specify commands to run. Use 'help run_sequence' for usage details.")
+                return
+                
+            # Split by semicolons but respect quoted semicolons
+            commands = []
+            current_cmd = ""
+            in_quotes = False
+            quote_char = None
+            
+            for char in arg:
+                if char in ['"', "'"]:
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                    current_cmd += char
+                elif char == ';' and not in_quotes:
+                    commands.append(current_cmd.strip())
+                    current_cmd = ""
+                else:
+                    current_cmd += char
+                    
+            if current_cmd.strip():
+                commands.append(current_cmd.strip())
+                
+            if not commands:
+                print("No valid commands provided.")
+                return
+                
+            print(f"Running sequence of {len(commands)} commands:")
+            
+            for i, cmd in enumerate(commands):
+                print(f"\n[{i+1}/{len(commands)}] $ {cmd}")
+                try:
+                    # Use subprocess to run the command
+                    process = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    
+                    # Print output
+                    if process.stdout:
+                        print(process.stdout)
+                    
+                    # Print errors if any
+                    if process.returncode != 0:
+                        print(f"Error (exit code {process.returncode}):")
+                        if process.stderr:
+                            print(process.stderr)
+                        
+                        # Ask whether to continue or abort
+                        choice = input("Command failed. Continue sequence? (y/n): ")
+                        if choice.lower() not in ['y', 'yes']:
+                            print("Sequence aborted.")
+                            return
+                except Exception as e:
+                    print(f"Error executing command: {e}")
+                    choice = input("Command failed. Continue sequence? (y/n): ")
+                    if choice.lower() not in ['y', 'yes']:
+                        print("Sequence aborted.")
+                        return
+                        
+            print("\nSequence completed.")
+            
+        def do_run_parallel(self, arg):
+            """Run multiple system commands in parallel and display their results.
+            
+            Usage: run_parallel <command1> | <command2> | ... | <commandN>
+            
+            Examples:
+              run_parallel ls -la | find . -name "*.py" | grep -r "import" --include="*.py" .
+            """
+            if not arg:
+                print("Please specify commands to run. Use 'help run_parallel' for usage details.")
+                return
+                
+            # Split by pipes but respect quoted pipes
+            commands = []
+            current_cmd = ""
+            in_quotes = False
+            quote_char = None
+            
+            for char in arg:
+                if char in ['"', "'"]:
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                    current_cmd += char
+                elif char == '|' and not in_quotes:
+                    commands.append(current_cmd.strip())
+                    current_cmd = ""
+                else:
+                    current_cmd += char
+                    
+            if current_cmd.strip():
+                commands.append(current_cmd.strip())
+                
+            if not commands:
+                print("No valid commands provided.")
+                return
+                
+            print(f"Running {len(commands)} commands in parallel:")
+            for i, cmd in enumerate(commands):
+                print(f"[{i+1}] $ {cmd}")
+                
+            try:
+                # Use our async function to run commands in parallel
+                results = asyncio.run(available_functions["run_commands_parallel"](commands))
+                
+                print("\nResults:")
+                for i, result in enumerate(results):
+                    print(f"\n[{i+1}] Command: {result['command']}")
+                    if result.get('success', False):
+                        print(f"Status: Success (exit code: {result.get('exit_code', 0)})")
+                        if result.get('stdout'):
+                            print("\nOutput:")
+                            print(result['stdout'])
+                    else:
+                        print("Status: Failed")
+                        if result.get('error'):
+                            print(f"Error: {result['error']}")
+                        elif result.get('stderr'):
+                            print("\nError output:")
+                            print(result['stderr'])
+                
+                print("\nAll parallel commands completed.")
+            except Exception as e:
+                print(f"Error running parallel commands: {e}")
+                traceback.print_exc()
             print(f"Memory files: {memory_files}")
             
             # Check conversation stats
