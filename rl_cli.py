@@ -22,6 +22,7 @@ import sqlite3
 import subprocess
 import platform
 import requests
+import socket
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, Union
 import importlib
@@ -9454,6 +9455,7 @@ class AgentCLI(cmd.Cmd):
             server_args = args[1:] if len(args) > 1 else []
             
             try:
+                import argparse
                 if server_type == "http":
                     # Parse arguments
                     parser = argparse.ArgumentParser()
