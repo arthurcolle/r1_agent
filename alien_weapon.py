@@ -4308,7 +4308,7 @@ class CognitiveModelingEngine:
             path=option_path_id
             )
             
-            metadata["created_paths"] = True
+        metadata["created_paths"] = True
         
         return self.add_reasoning_step(
             behavior=CognitiveBehavior.EXPLORATION,
