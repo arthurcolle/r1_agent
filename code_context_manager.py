@@ -234,23 +234,23 @@ class ASTAnalyzer:
                         parent = parent_map.get(parent)
                     
                     if not is_method:
-                    func_name = node.name
-                    line_start = node.lineno
-                    line_end = max(node.lineno, max([n.lineno for n in ast.walk(node) if hasattr(n, 'lineno')], default=node.lineno))
-                    
-                    # Extract the function definition including docstring
-                    func_lines = content.splitlines()[line_start-1:line_end]
-                    func_content = "\n".join(func_lines)
-                    
-                    token_id = f"{file_path}:{func_name}"
-                    tokens[token_id] = CodeToken(
-                        content=func_content,
-                        file_path=file_path,
-                        line_start=line_start,
-                        line_end=line_end,
-                        token_type="function"
-                    )
-                    self.functions[func_name] = token_id
+                        func_name = node.name
+                        line_start = node.lineno
+                        line_end = max(node.lineno, max([n.lineno for n in ast.walk(node) if hasattr(n, 'lineno')], default=node.lineno))
+                        
+                        # Extract the function definition including docstring
+                        func_lines = content.splitlines()[line_start-1:line_end]
+                        func_content = "\n".join(func_lines)
+                        
+                        token_id = f"{file_path}:{func_name}"
+                        tokens[token_id] = CodeToken(
+                            content=func_content,
+                            file_path=file_path,
+                            line_start=line_start,
+                            line_end=line_end,
+                            token_type="function"
+                        )
+                        self.functions[func_name] = token_id
             
             return tokens
         
