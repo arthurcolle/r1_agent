@@ -8988,7 +8988,6 @@ class AgentCLI(cmd.Cmd):
             except Exception as e:
                 print(f"Error running parallel commands: {e}")
                 traceback.print_exc()
-            print(f"Memory files: {memory_files}")
             
             # Check conversation stats
             print(f"Current conversation: {self.current_conversation}")
