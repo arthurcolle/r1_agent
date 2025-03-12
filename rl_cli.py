@@ -10134,6 +10134,147 @@ class AgentCLI(cmd.Cmd):
                 print(f"Unknown command: {command}")
                 print("Usage: jobs [list|submit|status|cancel]")
                 
+        def do_agent_creator(self, arg):
+            """
+            Manage agent creation: agent_creator [list|create|run]
+            
+            Commands:
+              list                - List available agent templates
+              create <template>   - Create a new agent from a template
+              template <name>     - Create a new agent template
+              run <agent_id>      - Run a created agent
+              
+            Examples:
+              agent_creator list
+              agent_creator create <template_id>
+              agent_creator template "Data Processor" "Processes data files" data_processing,file_handling
+              agent_creator run <agent_id>
+            """
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: agent_creator [list|create|template|run]")
+                return
+                
+            command = args[0].lower()
+            
+            # Check if agent creator integration is available
+            if not hasattr(self.agent, 'agent_creator_integration'):
+                print("Agent Creator Integration is not available.")
+                print("Please make sure the agent_creator_integration.py file is in the same directory.")
+                return
+                
+            try:
+                if command == "list":
+                    # List available templates
+                    templates = asyncio.run(self.agent.agent_creator_integration.list_templates())
+                    
+                    print("\nAvailable Agent Templates:")
+                    for i, template in enumerate(templates):
+                        print(f"{i+1}. {template['name']} (ID: {template['id']})")
+                        print(f"   Description: {template['description']}")
+                        print(f"   Capabilities: {', '.join(template['capabilities'])}")
+                        if "specialization" in template:
+                            print(f"   Specialization: {template['specialization']}")
+                            print(f"   Dependencies: {', '.join(template['dependencies'])}")
+                        print()
+                        
+                elif command == "create":
+                    if len(args) < 2:
+                        print("Usage: agent_creator create <template_id> [config_json]")
+                        return
+                        
+                    template_id = args[1]
+                    config = {}
+                    
+                    # Parse config if provided
+                    if len(args) > 2:
+                        try:
+                            config = json.loads(args[2])
+                        except json.JSONDecodeError:
+                            print(f"Invalid JSON config: {args[2]}")
+                            return
+                            
+                    # Create the agent
+                    print(f"Creating agent from template {template_id}...")
+                    result = asyncio.run(
+                        self.agent.agent_creator_integration.create_agent(template_id, config)
+                    )
+                    
+                    print(f"\nAgent created successfully:")
+                    print(f"ID: {result['id']}")
+                    print(f"Name: {result['name']}")
+                    print(f"File: {result['file_path']}")
+                    print(f"Created at: {result['created_at']}")
+                    print(f"\nTo run this agent, use: agent_creator run {result['id']}")
+                    
+                elif command == "template":
+                    if len(args) < 4:
+                        print("Usage: agent_creator template <name> <description> <capabilities> [specialization] [dependencies]")
+                        print("Example: agent_creator template \"Data Processor\" \"Processes data files\" data_processing,file_handling")
+                        return
+                        
+                    name = args[1]
+                    description = args[2]
+                    capabilities = args[3].split(",")
+                    
+                    specialization = None
+                    dependencies = []
+                    
+                    if len(args) > 4:
+                        specialization = args[4]
+                        
+                    if len(args) > 5:
+                        dependencies = args[5].split(",")
+                        
+                    # Create the template
+                    print(f"Creating template: {name}...")
+                    result = asyncio.run(
+                        self.agent.agent_creator_integration.create_template(
+                            name, description, capabilities, specialization, dependencies
+                        )
+                    )
+                    
+                    print(f"\nTemplate created successfully:")
+                    print(f"ID: {result['id']}")
+                    print(f"Name: {result['name']}")
+                    print(f"Capabilities: {', '.join(result['capabilities'])}")
+                    if "specialization" in result:
+                        print(f"Specialization: {result['specialization']}")
+                        print(f"Dependencies: {', '.join(result['dependencies'])}")
+                    
+                elif command == "run":
+                    if len(args) < 2:
+                        print("Usage: agent_creator run <agent_id>")
+                        return
+                        
+                    agent_id = args[1]
+                    
+                    # Run the agent
+                    print(f"Running agent {agent_id}...")
+                    result = asyncio.run(
+                        self.agent.agent_creator_integration.run_agent(agent_id)
+                    )
+                    
+                    print(f"\nAgent execution completed:")
+                    print(f"Success: {result['success']}")
+                    print(f"Exit code: {result['exit_code']}")
+                    
+                    if result.get('stdout'):
+                        print("\nStandard output:")
+                        print(result['stdout'])
+                        
+                    if result.get('stderr') and result['stderr'].strip():
+                        print("\nError output:")
+                        print(result['stderr'])
+                        
+                else:
+                    print(f"Unknown command: {command}")
+                    print("Usage: agent_creator [list|create|template|run]")
+                    
+            except Exception as e:
+                print(f"Error: {e}")
+                print(traceback.format_exc())
+                
         def do_exit(self, arg):
             """Exit the CLI: exit"""
             if hasattr(self, "observer"):
@@ -10144,6 +10285,9 @@ class AgentCLI(cmd.Cmd):
             # Stop job scheduler if it's running
             if hasattr(self.agent, 'job_scheduler') and self.agent.job_scheduler.running:
                 asyncio.run(self.agent.job_scheduler.stop())
+            # Stop agent creator integration if it's running
+            if hasattr(self.agent, 'agent_creator_integration'):
+                asyncio.run(self.agent.agent_creator_integration.stop())
             print("\nShutting down agent and cleaning up resources...")
             print("Goodbye!")
             return True
@@ -10739,6 +10883,9 @@ def print_usage():
     print("  --db PATH            Set database path (default: ./agent.db)")
     print("  --debug              Enable debug logging")
     print("  --mode MODE          Set initial response mode (normal, web_search, web_trawl, deep_research, deep_task, deep_flow)")
+    print("  --agent-creator      Enable agent creator functionality")
+    print("  --templates-dir DIR  Directory for agent templates (default: ./agent_templates)")
+    print("  --agents-dir DIR     Directory for generated agents (default: ./generated_agents)")
     print("\nExamples:")
     print("  python rl_cli.py --cli                    # Start in CLI mode")
     print("  python rl_cli.py --api --port 9000        # Run API server on port 9000")
@@ -10748,6 +10895,8 @@ def print_usage():
     print("  python rl_cli.py --watch ./documents      # Watch ./documents for PDFs")
     print("  python rl_cli.py --scripts ./my_scripts   # Use custom directory for generated scripts")
     print("  python rl_cli.py --mode deep_research     # Start in DEEP_RESEARCH response mode")
+    print("  python rl_cli.py --agent-creator          # Enable agent creator functionality")
+    print("  python rl_cli.py --agent-creator --templates-dir ./my_templates  # Custom templates directory")
 
 def main():
     """Main entry point for the CLI application"""
@@ -10780,6 +10929,9 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     parser.add_argument('--mode', type=str, choices=['normal', 'web_search', 'web_trawl', 'deep_research', 'deep_task', 'deep_flow'], 
                       default='normal', help='Set initial response mode')
+    parser.add_argument('--agent-creator', action='store_true', help='Enable agent creator functionality')
+    parser.add_argument('--templates-dir', type=str, default='./agent_templates', help='Directory for agent templates')
+    parser.add_argument('--agents-dir', type=str, default='./generated_agents', help='Directory for generated agents')
     
     # Add command argument for direct command execution
     parser.add_argument('command', nargs='*', help='Command to execute directly')
@@ -10848,11 +11000,43 @@ def main():
             cli.do_dashboard("")
             return
         
+        # Initialize agent creator if requested
+        if args.agent_creator:
+            try:
+                from agent_creator_integration import register_with_agent
+                
+                # Override directories if specified
+                if hasattr(args, 'templates_dir') or hasattr(args, 'agents_dir'):
+                    # We need to modify the AgentCreator class before initializing
+                    import autonomous_agent_creator
+                    if hasattr(args, 'templates_dir'):
+                        autonomous_agent_creator.AgentCreator.templates_dir = args.templates_dir
+                    if hasattr(args, 'agents_dir'):
+                        autonomous_agent_creator.AgentCreator.agents_dir = args.agents_dir
+                
+                print("Initializing Agent Creator Integration...")
+                integration = register_with_agent(cli.agent)
+                print(f"Agent Creator Integration initialized successfully")
+                print(f"Templates directory: {integration.creator.templates_dir}")
+                print(f"Agents directory: {integration.creator.agents_dir}")
+                
+                # Create default templates
+                asyncio.run(integration.creator.create_default_templates())
+                templates = asyncio.run(integration.list_templates())
+                print(f"Available templates: {len(templates)}")
+                
+            except ImportError:
+                print("Agent Creator Integration not available. Make sure the required files are in the same directory.")
+            except Exception as e:
+                print(f"Error initializing Agent Creator Integration: {e}")
+                print(traceback.format_exc())
+        
         # Start CLI
         mode_str = "autonomous mode" if args.autonomous else "standard mode"
         execute_str = "" if not args.no_execute else " (script auto-execution disabled)"
         response_mode_str = f", response mode: {cli.agent.response_mode.value}"
-        print(f"Starting Agent CLI with {mode_str}{execute_str}{response_mode_str}")
+        agent_creator_str = ", agent creator enabled" if args.agent_creator else ""
+        print(f"Starting Agent CLI with {mode_str}{execute_str}{response_mode_str}{agent_creator_str}")
         cli.cmdloop()
 
 if __name__ == "__main__":
