@@ -340,12 +340,35 @@ async def initialize_integration(agent_instance):
     await integration.start()
     return integration
 
+def get_integration(agent_instance):
+    """Get the integration for the given agent instance"""
+    if hasattr(agent_instance, '_extensions'):
+        return agent_instance._extensions.get('agent_creator_integration')
+    
+    # Try to get from global registry
+    if hasattr(sys.modules[__name__], '_integration_registry'):
+        agent_id = getattr(agent_instance, 'id', id(agent_instance))
+        return sys.modules[__name__]._integration_registry.get(agent_id)
+    
+    return None
+
 def register_with_agent(agent_instance):
     """Register the integration with the main agent"""
     # Create the integration
     integration = asyncio.run(initialize_integration(agent_instance))
     
-    # Store the integration in the agent for later use
-    agent_instance.agent_creator_integration = integration
+    # Store the integration in a global variable or attach it to a mutable attribute
+    # that already exists on the agent, rather than trying to add a new attribute
+    # to a Pydantic model
+    if hasattr(agent_instance, '_extensions'):
+        agent_instance._extensions['agent_creator_integration'] = integration
+    else:
+        # Create a global registry if we can't store it on the agent
+        if not hasattr(sys.modules[__name__], '_integration_registry'):
+            setattr(sys.modules[__name__], '_integration_registry', {})
+        
+        # Use the agent's id or another unique identifier
+        agent_id = getattr(agent_instance, 'id', id(agent_instance))
+        sys.modules[__name__]._integration_registry[agent_id] = integration
     
     return integration
