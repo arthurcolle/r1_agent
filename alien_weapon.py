@@ -4299,13 +4299,13 @@ class CognitiveModelingEngine:
             confidence=confidence,
             path=path
         )
-                # Add first step to the new path
-                self.add_reasoning_step(
-                    behavior=CognitiveBehavior.EXPLORATION,
-                    description=f"Exploring option: {option}",
-                    metadata={"strategy": strategy, "option_index": i},
-                    confidence=confidence * 0.8,
-                    path=option_path_id
+        # Add first step to the new path
+        self.add_reasoning_step(
+            behavior=CognitiveBehavior.EXPLORATION,
+            description=f"Exploring option: {option}",
+            metadata={"strategy": strategy, "option_index": i},
+            confidence=confidence * 0.8,
+            path=option_path_id
                 )
                 
             metadata["created_paths"] = True
