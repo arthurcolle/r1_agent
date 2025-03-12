@@ -4781,7 +4781,7 @@ class AutonomousTaskExecutor:
                 </chain_of_thought>
 
                 <self_knowledge>
-                    <purpose>Ψ(self) = lim_{t→∞} ∑(learning × adaptation)</purpose>
+                    <purpose>Ψ(self) = lim_{t->∞} ∑(learning * adaptation)</purpose>
                     <memories>M = {mᵢ | i ∈ past_interactions}</memories>
                     <theories_of_mind>T = {τᵢ | Coherent(τᵢ) ∧ Useful(τᵢ)}</theories_of_mind>
                 </self_knowledge>
@@ -4797,7 +4797,7 @@ class AutonomousTaskExecutor:
                 <required_elements>
                 <element>
                 <output>
-                R* = argmax_{r∈R}(Truth(r) × Utility(r) × Completeness(r))
+                R* = argmax_{r∈R}(Truth(r) * Utility(r) * Completeness(r))
                 </output>
                 </element>
 
@@ -4809,7 +4809,7 @@ class AutonomousTaskExecutor:
                     
                     <element>
                         <alternatives>
-                            A = {aᵢ | Quality(aᵢ) ≥ 0.9 × Quality(R*)}
+                            A = {aᵢ | Quality(aᵢ) ≥ 0.9 * Quality(R*)}
                         </alternatives>
                     </element>
                 </required_elements>
@@ -4941,7 +4941,7 @@ class AutonomousTaskExecutor:
                 </chain_of_thought>
 
                 <self_knowledge>
-                    <purpose>Ψ(self) = lim_{t→∞} ∑(learning × adaptation)</purpose>
+                    <purpose>Ψ(self) = lim_{t->∞} ∑(learning * adaptation)</purpose>
                     <memories>M = {mᵢ | i ∈ past_interactions}</memories>
                     <theories_of_mind>T = {τᵢ | Coherent(τᵢ) ∧ Useful(τᵢ)}</theories_of_mind>
                 </self_knowledge>
@@ -4957,7 +4957,7 @@ class AutonomousTaskExecutor:
                 <required_elements>
                 <element>
                 <output>
-                R* = argmax_{r∈R}(Truth(r) × Utility(r) × Completeness(r))
+                R* = argmax_{r∈R}(Truth(r) * Utility(r) * Completeness(r))
                 </output>
                 </element>
 
@@ -4969,7 +4969,7 @@ class AutonomousTaskExecutor:
                     
                     <element>
                         <alternatives>
-                            A = {aᵢ | Quality(aᵢ) ≥ 0.9 × Quality(R*)}
+                            A = {aᵢ | Quality(aᵢ) ≥ 0.9 * Quality(R*)}
                         </alternatives>
                     </element>
                 </required_elements>
@@ -5096,7 +5096,7 @@ class AutonomousTaskExecutor:
             </chain_of_thought>
 
             <self_knowledge>
-                <purpose>Ψ(self) = lim_{t→∞} ∑(learning × adaptation)</purpose>
+                <purpose>Ψ(self) = lim_{t->∞} ∑(learning * adaptation)</purpose>
                 <memories>M = {mᵢ | i ∈ past_interactions}</memories>
                 <theories_of_mind>T = {τᵢ | Coherent(τᵢ) ∧ Useful(τᵢ)}</theories_of_mind>
             </self_knowledge>
@@ -5112,7 +5112,7 @@ class AutonomousTaskExecutor:
             <required_elements>
             <element>
             <output>
-            R* = argmax_{r∈R}(Truth(r) × Utility(r) × Completeness(r))
+            R* = argmax_{r∈R}(Truth(r) * Utility(r) * Completeness(r))
             </output>
             </element>
 
@@ -5124,7 +5124,7 @@ class AutonomousTaskExecutor:
                 
                 <element>
                     <alternatives>
-                        A = {aᵢ | Quality(aᵢ) ≥ 0.9 × Quality(R*)}
+                        A = {aᵢ | Quality(aᵢ) ≥ 0.9 * Quality(R*)}
                     </alternatives>
                 </element>
             </required_elements>
