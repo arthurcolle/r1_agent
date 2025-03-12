@@ -6900,6 +6900,7 @@ Your goal is to provide an interactive, multi-agent problem-solving experience t
         await self.ensure_job_scheduler_running()
 
         # Check for shell command execution request
+        import re
         shell_command_pattern = r"^(?:run|execute|shell):\s*(.+)$"
         shell_match = re.match(shell_command_pattern, question, re.IGNORECASE)
         if shell_match:
