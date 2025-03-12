@@ -280,6 +280,27 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
     # Command execution
     tools["run_command"] = lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True)
     
+    # Enhanced shell command execution
+    async def execute_shell_command(command: str) -> Dict[str, Any]:
+        """Execute a shell command and return structured output"""
+        try:
+            process = subprocess.run(command, shell=True, capture_output=True, text=True)
+            return {
+                "success": process.returncode == 0,
+                "exit_code": process.returncode,
+                "stdout": process.stdout,
+                "stderr": process.stderr,
+                "command": command
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "command": command
+            }
+    
+    tools["execute_shell_command"] = execute_shell_command
+    
     # Advanced code writing tools
     async def generate_code(spec: str, language: str = "python", comments: bool = True) -> Dict[str, Any]:
         """Generate code based on a specification"""
@@ -477,6 +498,19 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "List of shell commands to execute in parallel"
+            }
+        }
+    )
+    
+    # Register the shell command execution tool
+    register_tool(
+        name="execute_shell_command",
+        func=execute_shell_command,
+        description="Execute a shell command and return the results",
+        parameters={
+            "command": {
+                "type": "string",
+                "description": "Shell command to execute"
             }
         }
     )
@@ -6865,6 +6899,32 @@ Your goal is to provide an interactive, multi-agent problem-solving experience t
         # Ensure job scheduler is running
         await self.ensure_job_scheduler_running()
 
+        # Check for shell command execution request
+        shell_command_pattern = r"^(?:run|execute|shell):\s*(.+)$"
+        shell_match = re.match(shell_command_pattern, question, re.IGNORECASE)
+        if shell_match:
+            command = shell_match.group(1).strip()
+            try:
+                # Execute the command
+                process = subprocess.run(command, shell=True, capture_output=True, text=True)
+                
+                # Format the response
+                response = f"Executed command: `{command}`\n\n"
+                if process.stdout:
+                    response += f"**Output:**\n```\n{process.stdout}\n```\n\n"
+                
+                if process.returncode != 0:
+                    response += f"**Error (exit code {process.returncode}):**\n```\n{process.stderr}\n```"
+                elif not process.stdout:
+                    response += "Command executed successfully with no output."
+                
+                await self.add_to_conversation(conv_id, "assistant", response)
+                return response
+            except Exception as e:
+                error_response = f"Error executing command: {str(e)}"
+                await self.add_to_conversation(conv_id, "assistant", error_response)
+                return error_response
+
         # Check for response mode change request
         mode_change_patterns = [
             (r"(?:use|switch to|enable)\s+web\s*search\s*mode", ResponseMode.WEB_SEARCH),
@@ -9981,6 +10041,29 @@ class AgentCLI(cmd.Cmd):
             except Exception as e:
                 print(f"Error searching code: {e}")
                 
+        def do_shell(self, arg):
+            """Execute a shell command directly and display the output: shell <command>"""
+            if not arg:
+                print("Usage: shell <command>")
+                return
+                
+            try:
+                # Use subprocess to run the command
+                process = subprocess.run(arg, shell=True, capture_output=True, text=True)
+                
+                # Print output
+                if process.stdout:
+                    print(process.stdout)
+                
+                # Print errors if any
+                if process.returncode != 0:
+                    print(f"Error (exit code {process.returncode}):")
+                    if process.stderr:
+                        print(process.stderr)
+            except Exception as e:
+                print(f"Error executing command: {e}")
+                print(traceback.format_exc())
+                
         def do_search_knowledge(self, arg):
             """Search knowledge base: search_knowledge <query> [collection_id]"""
             args = shlex.split(arg)
@@ -11194,6 +11277,7 @@ def main():
     parser.add_argument('--agent-creator', action='store_true', help='Enable agent creator functionality')
     parser.add_argument('--templates-dir', type=str, default='./agent_templates', help='Directory for agent templates')
     parser.add_argument('--agents-dir', type=str, default='./generated_agents', help='Directory for generated agents')
+    parser.add_argument('--shell-command', type=str, help='Execute a shell command and exit')
     
     # Add command argument for direct command execution
     parser.add_argument('command', nargs='*', help='Command to execute directly')
@@ -11292,6 +11376,84 @@ def main():
             except Exception as e:
                 print(f"Error initializing Agent Creator Integration: {e}")
                 print(traceback.format_exc())
+                
+        # Register shell command tools if available
+        try:
+            from shell_command_tool import execute_shell_command, get_file_count, list_files_with_details
+            
+            # Register the file count tool
+            register_tool(
+                name="get_file_count",
+                func=get_file_count,
+                description="Count files in a directory",
+                parameters={
+                    "directory": {
+                        "type": "string",
+                        "description": "Directory to count files in (default: current directory)",
+                        "default": "."
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Whether to count files in subdirectories",
+                        "default": False
+                    }
+                }
+            )
+            
+            # Register the file listing tool
+            register_tool(
+                name="list_files_with_details",
+                func=list_files_with_details,
+                description="List files with details in a directory",
+                parameters={
+                    "directory": {
+                        "type": "string",
+                        "description": "Directory to list files in (default: current directory)",
+                        "default": "."
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "File pattern to match",
+                        "default": "*"
+                    }
+                }
+            )
+            
+            print("Shell command tools registered successfully")
+        except ImportError:
+            # Shell command tools not available, but that's okay
+            pass
+        
+        # Check if a shell command was provided
+        if args.shell_command:
+            # Execute the shell command and exit
+            try:
+                # Import the shell command tool
+                try:
+                    from shell_command_tool import execute_shell_command_sync
+                    result = execute_shell_command_sync(args.shell_command)
+                except ImportError:
+                    # Fall back to subprocess if shell_command_tool is not available
+                    result = subprocess.run(args.shell_command, shell=True, capture_output=True, text=True)
+                    result = {
+                        "success": result.returncode == 0,
+                        "exit_code": result.returncode,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "command": args.shell_command
+                    }
+                
+                # Print the output
+                if result["stdout"]:
+                    print(result["stdout"])
+                if result["stderr"]:
+                    print(result["stderr"], file=sys.stderr)
+                
+                # Exit with the command's exit code
+                sys.exit(result["exit_code"] if "exit_code" in result and result["exit_code"] is not None else 0)
+            except Exception as e:
+                print(f"Error executing shell command: {e}", file=sys.stderr)
+                sys.exit(1)
         
         # Start CLI
         mode_str = "autonomous mode" if args.autonomous else "standard mode"
