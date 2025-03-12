@@ -136,7 +136,9 @@ def detect_system_capabilities() -> Dict[str, Any]:
         "python_version": platform.python_version(),
         "env_vars": {},
         "commands": {},
-        "apis": {}
+        "apis": {},
+        "network": {},
+        "hardware": {}
     }
     
     # Detect environment variables for APIs
@@ -147,13 +149,41 @@ def detect_system_capabilities() -> Dict[str, Any]:
             capabilities["env_vars"][service] = key
 
     # Detect common command line tools
-    common_commands = ['git', 'curl', 'wget', 'ffmpeg', 'pandoc']
+    common_commands = ['git', 'curl', 'wget', 'ffmpeg', 'pandoc', 'docker', 'npm', 'pip']
     for cmd in common_commands:
         try:
             subprocess.run([cmd, '--version'], capture_output=True)
             capabilities["commands"][cmd] = True
         except FileNotFoundError:
             capabilities["commands"][cmd] = False
+            
+    # Detect network capabilities
+    try:
+        import socket
+        hostname = socket.gethostname()
+        ip_address = socket.gethostbyname(hostname)
+        capabilities["network"]["hostname"] = hostname
+        capabilities["network"]["ip_address"] = ip_address
+        
+        # Check internet connectivity
+        try:
+            socket.create_connection(("8.8.8.8", 53), timeout=3)
+            capabilities["network"]["internet"] = True
+        except OSError:
+            capabilities["network"]["internet"] = False
+    except Exception as e:
+        capabilities["network"]["error"] = str(e)
+        
+    # Detect hardware capabilities
+    try:
+        import psutil
+        capabilities["hardware"]["cpu_count"] = psutil.cpu_count()
+        capabilities["hardware"]["memory_total"] = psutil.virtual_memory().total
+        capabilities["hardware"]["disk_total"] = psutil.disk_usage('/').total
+    except ImportError:
+        pass
+    except Exception as e:
+        capabilities["hardware"]["error"] = str(e)
 
     return capabilities
 
@@ -167,18 +197,37 @@ class JinaClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+        self.session = requests.Session()
+        self.retry_count = 3
+        self.timeout = 10.0
     
     async def search(self, query: str) -> dict:
         """Search using s.jina.ai endpoint"""
         try:
             encoded_query = urllib.parse.quote(query)
             url = f"https://s.jina.ai/{encoded_query}"
-            response = requests.get(url, headers=self.headers, timeout=10.0)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logging.warning(f"Jina search error: HTTP {response.status_code}")
-                return {"weather_description": "Weather information unavailable"}
+            
+            for attempt in range(self.retry_count):
+                try:
+                    response = self.session.get(url, headers=self.headers, timeout=self.timeout)
+                    if response.status_code == 200:
+                        return response.json()
+                    elif response.status_code == 429:  # Rate limit
+                        wait_time = min(2 ** attempt, 8)  # Exponential backoff
+                        logging.warning(f"Rate limited, waiting {wait_time}s before retry")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logging.warning(f"Jina search error: HTTP {response.status_code}")
+                        break
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                    if attempt < self.retry_count - 1:
+                        wait_time = min(2 ** attempt, 8)
+                        logging.warning(f"Network error, retrying in {wait_time}s: {str(e)}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+            
+            return {"weather_description": "Weather information unavailable"}
         except json.JSONDecodeError as e:
             logging.error(f"Jina search error: {str(e)}")
             return {"weather_description": "Weather information unavailable"}
@@ -188,17 +237,31 @@ class JinaClient:
     
     async def fact_check(self, query: str) -> dict:
         """Get grounding info using g.jina.ai endpoint"""
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://g.jina.ai/{encoded_query}"
-        response = requests.get(url, headers=self.headers)
-        return response.json()
+        try:
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://g.jina.ai/{encoded_query}"
+            response = self.session.get(url, headers=self.headers, timeout=self.timeout)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": f"HTTP {response.status_code}"}
+        except Exception as e:
+            logging.error(f"Jina fact check error: {str(e)}")
+            return {"error": str(e)}
         
     async def reader(self, url: str) -> dict:
         """Get ranking using r.jina.ai endpoint"""
-        encoded_url = urllib.parse.quote(url)
-        url = f"https://r.jina.ai/{encoded_url}"
-        response = requests.get(url, headers=self.headers)
-        return response.json()
+        try:
+            encoded_url = urllib.parse.quote(url)
+            endpoint = f"https://r.jina.ai/{encoded_url}"
+            response = self.session.get(endpoint, headers=self.headers, timeout=self.timeout)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": f"HTTP {response.status_code}"}
+        except Exception as e:
+            logging.error(f"Jina reader error: {str(e)}")
+            return {"error": str(e)}
 
 def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
     """Create tool functions based on detected capabilities"""
@@ -208,9 +271,171 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
     tools["read_file"] = lambda path: Path(path).read_text() if Path(path).exists() else None
     tools["write_file"] = lambda path, content: Path(path).write_text(content)
     tools["list_files"] = lambda path=".", pattern="*": list(Path(path).glob(pattern))
+    tools["file_exists"] = lambda path: Path(path).exists()
+    tools["file_size"] = lambda path: Path(path).stat().st_size if Path(path).exists() else None
+    tools["file_modified"] = lambda path: datetime.fromtimestamp(Path(path).stat().st_mtime).isoformat() if Path(path).exists() else None
+    tools["create_directory"] = lambda path: Path(path).mkdir(parents=True, exist_ok=True)
+    tools["delete_file"] = lambda path: Path(path).unlink() if Path(path).exists() else False
     
     # Command execution
     tools["run_command"] = lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    
+    # Advanced code writing tools
+    async def generate_code(spec: str, language: str = "python", comments: bool = True) -> Dict[str, Any]:
+        """Generate code based on a specification"""
+        try:
+            # Create a prompt for code generation
+            prompt = f"""
+            Generate {language} code based on this specification:
+            {spec}
+            
+            Requirements:
+            - The code should be complete and runnable
+            - Include proper error handling
+            - {'Include detailed comments' if comments else 'Keep comments minimal'}
+            - Follow best practices for {language}
+            
+            Return ONLY the code without any explanations or markdown.
+            """
+            
+            # Use the OpenAI client to generate code
+            messages = [
+                {"role": "system", "content": f"You are an expert {language} developer."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            response = await client.chat.completions.create(
+                model="o3-mini",
+                messages=messages,
+                temperature=0.2
+            )
+            
+            generated_code = response.choices[0].message.content
+            
+            # Clean up the code (remove markdown code blocks if present)
+            code = re.sub(r'^```.*\n|```$', '', generated_code, flags=re.MULTILINE).strip()
+            
+            return {
+                "success": True,
+                "code": code,
+                "language": language
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    tools["generate_code"] = generate_code
+    
+    async def refactor_code(code: str, instructions: str, language: str = "python") -> Dict[str, Any]:
+        """Refactor existing code based on instructions"""
+        try:
+            # Create a prompt for code refactoring
+            prompt = f"""
+            Refactor this {language} code according to these instructions:
+            
+            INSTRUCTIONS:
+            {instructions}
+            
+            CODE TO REFACTOR:
+            ```{language}
+            {code}
+            ```
+            
+            Return ONLY the refactored code without any explanations or markdown.
+            """
+            
+            # Use the OpenAI client to refactor code
+            messages = [
+                {"role": "system", "content": f"You are an expert {language} developer specializing in code refactoring."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            response = await client.chat.completions.create(
+                model="o3-mini",
+                messages=messages,
+                temperature=0.2
+            )
+            
+            refactored_code = response.choices[0].message.content
+            
+            # Clean up the code (remove markdown code blocks if present)
+            code = re.sub(r'^```.*\n|```$', '', refactored_code, flags=re.MULTILINE).strip()
+            
+            return {
+                "success": True,
+                "code": code,
+                "language": language
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    tools["refactor_code"] = refactor_code
+    
+    async def analyze_code(code: str, language: str = "python") -> Dict[str, Any]:
+        """Analyze code for quality, bugs, and improvement opportunities"""
+        try:
+            # Create a prompt for code analysis
+            prompt = f"""
+            Analyze this {language} code for quality, bugs, and improvement opportunities:
+            
+            ```{language}
+            {code}
+            ```
+            
+            Provide a detailed analysis including:
+            1. Potential bugs or errors
+            2. Code quality issues
+            3. Performance concerns
+            4. Security vulnerabilities
+            5. Improvement suggestions
+            
+            Format your response as JSON with these sections.
+            """
+            
+            # Use the OpenAI client to analyze code
+            messages = [
+                {"role": "system", "content": f"You are an expert {language} code reviewer."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            response = await client.chat.completions.create(
+                model="o3-mini",
+                messages=messages,
+                temperature=0.2
+            )
+            
+            analysis_text = response.choices[0].message.content
+            
+            # Extract JSON from the response
+            try:
+                # Try to parse the entire response as JSON
+                analysis = json.loads(analysis_text)
+            except json.JSONDecodeError:
+                # If that fails, try to extract JSON from markdown
+                json_match = re.search(r'```json\n(.*?)\n```', analysis_text, re.DOTALL)
+                if json_match:
+                    analysis = json.loads(json_match.group(1))
+                else:
+                    # If no JSON found, return the text as is
+                    analysis = {"raw_analysis": analysis_text}
+            
+            return {
+                "success": True,
+                "analysis": analysis,
+                "language": language
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    tools["analyze_code"] = analyze_code
     
     # Parallel command execution
     async def run_commands_parallel(commands: List[str]) -> List[Dict[str, Any]]:
@@ -259,6 +484,104 @@ def setup_system_tools(capabilities: Dict[str, Any]) -> Dict[str, Callable]:
     # Web operations if requests is available
     if "requests" in sys.modules:
         tools["web_get"] = lambda url: requests.get(url).text
+        tools["web_post"] = lambda url, data=None, json=None, headers=None: requests.post(url, data=data, json=json, headers=headers).text
+        tools["web_download"] = lambda url, path: open(path, 'wb').write(requests.get(url, stream=True).content)
+        
+        # Network awareness tools
+        async def check_connectivity(host: str = "8.8.8.8", port: int = 53, timeout: float = 3.0) -> Dict[str, Any]:
+            """Check internet connectivity by attempting to connect to a host"""
+            try:
+                start_time = time.time()
+                socket.create_connection((host, port), timeout=timeout)
+                latency = time.time() - start_time
+                return {
+                    "connected": True,
+                    "latency_ms": round(latency * 1000, 2),
+                    "host": host,
+                    "port": port
+                }
+            except OSError as e:
+                return {
+                    "connected": False,
+                    "error": str(e),
+                    "host": host,
+                    "port": port
+                }
+        
+        tools["check_connectivity"] = check_connectivity
+        
+        async def get_network_info() -> Dict[str, Any]:
+            """Get detailed information about the network configuration"""
+            try:
+                info = {
+                    "hostname": socket.gethostname(),
+                    "interfaces": {},
+                    "dns_servers": [],
+                    "public_ip": None
+                }
+                
+                # Get network interfaces
+                import netifaces
+                for interface in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        info["interfaces"][interface] = {
+                            "ipv4": addrs[netifaces.AF_INET][0]["addr"],
+                            "netmask": addrs[netifaces.AF_INET][0]["netmask"]
+                        }
+                    if netifaces.AF_INET6 in addrs:
+                        info["interfaces"][interface] = {
+                            "ipv6": addrs[netifaces.AF_INET6][0]["addr"],
+                            "prefixlen": addrs[netifaces.AF_INET6][0]["prefixlen"]
+                        }
+                
+                # Get DNS servers
+                import dns.resolver
+                info["dns_servers"] = dns.resolver.Resolver().nameservers
+                
+                # Get public IP
+                try:
+                    public_ip_response = requests.get("https://api.ipify.org", timeout=3)
+                    if public_ip_response.status_code == 200:
+                        info["public_ip"] = public_ip_response.text
+                except Exception:
+                    pass
+                
+                return info
+            except ImportError:
+                # Fallback if netifaces or dnspython is not available
+                return {
+                    "hostname": socket.gethostname(),
+                    "ip_address": socket.gethostbyname(socket.gethostname())
+                }
+            except Exception as e:
+                return {"error": str(e)}
+        
+        tools["get_network_info"] = get_network_info
+        
+        async def port_scan(host: str, ports: List[int]) -> Dict[str, Any]:
+            """Scan for open ports on a host"""
+            results = {}
+            for port in ports:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1.0)
+                    result = sock.connect_ex((host, port))
+                    if result == 0:
+                        results[port] = "open"
+                    else:
+                        results[port] = "closed"
+                    sock.close()
+                except Exception as e:
+                    results[port] = f"error: {str(e)}"
+            
+            return {
+                "host": host,
+                "scan_results": results,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        tools["port_scan"] = port_scan
         
         # Jina.ai integration
         if "JINA_API_KEY" in os.environ:
@@ -10087,6 +10410,289 @@ class JobScheduler:
         finally:
             self.running_jobs -= 1
             logging.info(f"Job completed: {job.name} (ID: {job.job_id}, Status: {job.status.name})")
+
+# ------------------------------------------------------------------------------
+# Supervision Tree & Dynamic Dispatch
+# ------------------------------------------------------------------------------
+
+class SupervisorNode:
+    """
+    A node in the supervision tree that can monitor and restart child processes.
+    Implements the Erlang-style supervision model for fault tolerance.
+    """
+    def __init__(self, name: str, restart_strategy: str = "one_for_one"):
+        """
+        Initialize a supervisor node
+        
+        Args:
+            name: Name of the supervisor
+            restart_strategy: Strategy for restarting children
+                - one_for_one: Only restart the failed child
+                - one_for_all: Restart all children if any fails
+                - rest_for_one: Restart the failed child and all that depend on it
+        """
+        self.name = name
+        self.restart_strategy = restart_strategy
+        self.children = {}  # name -> (process, spec)
+        self.max_restarts = 5
+        self.restart_window = 60  # seconds
+        self.restart_history = []
+        self.running = False
+        self.monitor_task = None
+        
+    async def start(self):
+        """Start the supervisor"""
+        self.running = True
+        self.monitor_task = asyncio.create_task(self._monitor_loop())
+        logging.info(f"Supervisor {self.name} started with {self.restart_strategy} strategy")
+        
+    async def stop(self):
+        """Stop the supervisor and all children"""
+        self.running = False
+        if self.monitor_task:
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
+                
+        # Stop all children
+        for child_name, (process, _) in list(self.children.items()):
+            await self.stop_child(child_name)
+            
+        logging.info(f"Supervisor {self.name} stopped")
+        
+    async def add_child(self, name: str, func: Callable, args: List[Any] = None, 
+                      kwargs: Dict[str, Any] = None, restart: bool = True,
+                      max_restarts: int = 3) -> bool:
+        """
+        Add a child process to the supervision tree
+        
+        Args:
+            name: Name of the child process
+            func: Function to run in the child process
+            args: Positional arguments for the function
+            kwargs: Keyword arguments for the function
+            restart: Whether to restart the child on failure
+            max_restarts: Maximum number of restarts for this child
+            
+        Returns:
+            bool: Success status
+        """
+        if name in self.children:
+            logging.warning(f"Child {name} already exists in supervisor {self.name}")
+            return False
+            
+        # Create child spec
+        spec = {
+            "func": func,
+            "args": args or [],
+            "kwargs": kwargs or {},
+            "restart": restart,
+            "max_restarts": max_restarts,
+            "restarts": 0
+        }
+        
+        # Start the child process
+        process = await self._start_child_process(name, spec)
+        if process:
+            self.children[name] = (process, spec)
+            logging.info(f"Added child {name} to supervisor {self.name}")
+            return True
+        else:
+            logging.error(f"Failed to start child {name}")
+            return False
+            
+    async def stop_child(self, name: str) -> bool:
+        """Stop a child process"""
+        if name not in self.children:
+            logging.warning(f"Child {name} not found in supervisor {self.name}")
+            return False
+            
+        process, _ = self.children[name]
+        if process and not process.done():
+            process.cancel()
+            try:
+                await process
+            except asyncio.CancelledError:
+                pass
+                
+        del self.children[name]
+        logging.info(f"Stopped child {name} in supervisor {self.name}")
+        return True
+        
+    async def restart_child(self, name: str) -> bool:
+        """Restart a child process"""
+        if name not in self.children:
+            logging.warning(f"Child {name} not found in supervisor {self.name}")
+            return False
+            
+        _, spec = self.children[name]
+        
+        # Stop the current process
+        await self.stop_child(name)
+        
+        # Start a new process
+        process = await self._start_child_process(name, spec)
+        if process:
+            self.children[name] = (process, spec)
+            spec["restarts"] += 1
+            
+            # Record restart for rate limiting
+            self.restart_history.append(time.time())
+            
+            logging.info(f"Restarted child {name} in supervisor {self.name}")
+            return True
+        else:
+            logging.error(f"Failed to restart child {name}")
+            return False
+            
+    async def _start_child_process(self, name: str, spec: Dict[str, Any]) -> Optional[asyncio.Task]:
+        """Start a child process as an asyncio task"""
+        try:
+            func = spec["func"]
+            args = spec["args"]
+            kwargs = spec["kwargs"]
+            
+            # Create and start the task
+            if asyncio.iscoroutinefunction(func):
+                task = asyncio.create_task(func(*args, **kwargs))
+            else:
+                # Run synchronous functions in a thread pool
+                loop = asyncio.get_event_loop()
+                task = asyncio.create_task(loop.run_in_executor(
+                    None, lambda: func(*args, **kwargs)))
+                
+            # Set name for easier debugging
+            task.set_name(f"{self.name}:{name}")
+            
+            return task
+        except Exception as e:
+            logging.error(f"Error starting child {name}: {e}")
+            return None
+            
+    async def _monitor_loop(self):
+        """Monitor child processes and restart them if needed"""
+        try:
+            while self.running:
+                # Check each child
+                for name, (process, spec) in list(self.children.items()):
+                    if process.done():
+                        # Child has completed or failed
+                        try:
+                            # Get the result or exception
+                            result = process.result()
+                            logging.info(f"Child {name} completed with result: {result}")
+                            
+                            # Don't restart if it completed normally
+                            if not spec["restart"]:
+                                del self.children[name]
+                                
+                        except Exception as e:
+                            logging.error(f"Child {name} failed with error: {e}")
+                            
+                            # Check if we should restart
+                            if spec["restart"] and spec["restarts"] < spec["max_restarts"]:
+                                # Check restart rate
+                                now = time.time()
+                                recent_restarts = sum(1 for t in self.restart_history 
+                                                    if now - t < self.restart_window)
+                                
+                                if recent_restarts < self.max_restarts:
+                                    # Apply restart strategy
+                                    if self.restart_strategy == "one_for_one":
+                                        await self.restart_child(name)
+                                    elif self.restart_strategy == "one_for_all":
+                                        # Restart all children
+                                        for child_name in list(self.children.keys()):
+                                            await self.restart_child(child_name)
+                                    elif self.restart_strategy == "rest_for_one":
+                                        # Find position of failed child
+                                        child_names = list(self.children.keys())
+                                        if name in child_names:
+                                            idx = child_names.index(name)
+                                            # Restart this child and all that follow
+                                            for child_name in child_names[idx:]:
+                                                await self.restart_child(child_name)
+                                else:
+                                    logging.error(f"Too many restarts in supervisor {self.name}, not restarting {name}")
+                            else:
+                                logging.warning(f"Child {name} has reached max restarts, removing from supervisor")
+                                del self.children[name]
+                
+                # Clean up old restart history
+                now = time.time()
+                self.restart_history = [t for t in self.restart_history if now - t < self.restart_window]
+                
+                # Wait before checking again
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            logging.info(f"Supervisor {self.name} monitor loop cancelled")
+            raise
+        except Exception as e:
+            logging.error(f"Error in supervisor {self.name} monitor loop: {e}")
+
+class DynamicDispatcher:
+    """
+    Dynamic dispatch system that routes requests to appropriate handlers
+    based on content, type, or other attributes.
+    """
+    def __init__(self):
+        self.handlers = {}  # pattern -> handler_func
+        self.fallback_handler = None
+        self.middleware = []
+        
+    def register_handler(self, pattern: str, handler_func: Callable) -> None:
+        """Register a handler for a specific pattern"""
+        self.handlers[pattern] = handler_func
+        
+    def register_fallback(self, handler_func: Callable) -> None:
+        """Register a fallback handler for when no pattern matches"""
+        self.fallback_handler = handler_func
+        
+    def add_middleware(self, middleware_func: Callable) -> None:
+        """Add middleware that processes requests before handlers"""
+        self.middleware.append(middleware_func)
+        
+    async def dispatch(self, content: str, **kwargs) -> Any:
+        """
+        Dispatch a request to the appropriate handler
+        
+        Args:
+            content: The content to dispatch
+            **kwargs: Additional context for handlers
+            
+        Returns:
+            The result from the handler
+        """
+        # Apply middleware
+        context = kwargs.copy()
+        for mw_func in self.middleware:
+            if asyncio.iscoroutinefunction(mw_func):
+                content, context = await mw_func(content, context)
+            else:
+                content, context = mw_func(content, context)
+                
+        # Find matching handler
+        handler = None
+        for pattern, handler_func in self.handlers.items():
+            if pattern in content or re.search(pattern, content, re.IGNORECASE):
+                handler = handler_func
+                break
+                
+        # Use fallback if no handler found
+        if handler is None and self.fallback_handler:
+            handler = self.fallback_handler
+            
+        # Execute handler
+        if handler:
+            if asyncio.iscoroutinefunction(handler):
+                return await handler(content, **context)
+            else:
+                return handler(content, **context)
+        else:
+            raise ValueError(f"No handler found for content: {content[:50]}...")
 
 # ------------------------------------------------------------------------------
 # Main Entry Point: Choose RL, CLI, or FastAPI with enhanced command-line options
