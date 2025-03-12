@@ -3567,11 +3567,12 @@ if __name__ == "__main__":
 class Task(BaseModel):
     """
     Represents a task that can be created, tracked, and executed by the agent.
+    Enhanced with checkpointing and resumption capabilities.
     """
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
     description: str
-    status: str = "pending"  # pending, in_progress, completed, failed
+    status: str = "pending"  # pending, in_progress, completed, failed, paused
     priority: int = 5  # 1-10, lower is higher priority
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     updated_at: Optional[str] = None
@@ -3580,6 +3581,16 @@ class Task(BaseModel):
     tags: List[str] = Field(default_factory=list)
     result: Optional[Any] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    # New fields for autonomous work
+    progress: float = 0.0  # Progress from 0.0 to 1.0
+    checkpoint_data: Dict[str, Any] = Field(default_factory=dict)  # Stores resumable state
+    last_checkpoint: Optional[str] = None  # Timestamp of last checkpoint
+    estimated_time_remaining: Optional[float] = None  # In seconds
+    subtasks: List[Dict[str, Any]] = Field(default_factory=list)  # Hierarchical task breakdown
+    autonomous_mode: bool = False  # Whether this task can be worked on autonomously
+    interruption_count: int = 0  # Number of times this task has been interrupted
+    resumption_strategy: str = "continue"  # continue, restart, or adaptive
 
     def update_status(self, status: str):
         """Update task status and timestamp"""
@@ -3587,22 +3598,107 @@ class Task(BaseModel):
         self.updated_at = datetime.now().isoformat()
         if status == "completed":
             self.completed_at = datetime.now().isoformat()
+            self.progress = 1.0
+        elif status == "paused":
+            # Create a checkpoint when pausing
+            self.create_checkpoint()
 
     def add_tag(self, tag: str):
         """Add a tag to the task"""
         if tag not in self.tags:
             self.tags.append(tag)
             self.updated_at = datetime.now().isoformat()
+            
+    def update_progress(self, progress: float, save_checkpoint: bool = True):
+        """Update task progress and optionally create a checkpoint"""
+        self.progress = max(0.0, min(1.0, progress))
+        self.updated_at = datetime.now().isoformat()
+        
+        if save_checkpoint:
+            self.create_checkpoint()
+            
+    def create_checkpoint(self):
+        """Create a checkpoint of the current task state"""
+        self.last_checkpoint = datetime.now().isoformat()
+        # Store any additional state needed for resumption in checkpoint_data
+        
+    def resume_from_checkpoint(self):
+        """Resume task execution from the last checkpoint"""
+        if not self.last_checkpoint:
+            return False
+            
+        self.interruption_count += 1
+        if self.status == "paused":
+            self.status = "in_progress"
+            self.updated_at = datetime.now().isoformat()
+        
+        return True
+        
+    def add_subtask(self, title: str, description: str, priority: int = 5):
+        """Add a subtask to this task"""
+        subtask = {
+            "id": str(uuid.uuid4()),
+            "title": title,
+            "description": description,
+            "priority": priority,
+            "status": "pending",
+            "created_at": datetime.now().isoformat()
+        }
+        self.subtasks.append(subtask)
+        return subtask["id"]
+        
+    def get_subtask(self, subtask_id: str):
+        """Get a subtask by ID"""
+        for subtask in self.subtasks:
+            if subtask["id"] == subtask_id:
+                return subtask
+        return None
+        
+    def update_subtask(self, subtask_id: str, status: str, progress: float = None):
+        """Update a subtask's status and progress"""
+        for i, subtask in enumerate(self.subtasks):
+            if subtask["id"] == subtask_id:
+                subtask["status"] = status
+                subtask["updated_at"] = datetime.now().isoformat()
+                if progress is not None:
+                    subtask["progress"] = progress
+                if status == "completed":
+                    subtask["completed_at"] = datetime.now().isoformat()
+                self.subtasks[i] = subtask
+                
+                # Update overall task progress based on subtasks
+                self._recalculate_progress()
+                return True
+        return False
+        
+    def _recalculate_progress(self):
+        """Recalculate overall progress based on subtasks"""
+        if not self.subtasks:
+            return
+            
+        completed = sum(1 for s in self.subtasks if s.get("status") == "completed")
+        in_progress = sum(s.get("progress", 0) for s in self.subtasks 
+                         if s.get("status") == "in_progress" and "progress" in s)
+        
+        total_progress = (completed + in_progress) / len(self.subtasks)
+        self.progress = total_progress
 
 class TaskManager:
     """
     Manages tasks for the agent, including creation, tracking, and execution.
+    Enhanced with persistent state management and autonomous task selection.
     """
     def __init__(self, db_conn: Optional[sqlite3.Connection] = None):
         self.tasks: Dict[str, Task] = {}
         self.db_conn = db_conn
+        self.current_autonomous_task_id: Optional[str] = None
+        self.autonomous_mode_enabled: bool = False
+        self.task_history: List[Dict[str, Any]] = []
+        self.task_graph = nx.DiGraph()  # Dependency graph for tasks
+        
         if db_conn:
             self._create_tables()
+            self._load_tasks_from_db()
 
     def _create_tables(self):
         """Create necessary tables if they don't exist"""
@@ -3620,20 +3716,57 @@ class TaskManager:
                 dependencies TEXT,
                 tags TEXT,
                 result TEXT,
-                metadata TEXT
+                metadata TEXT,
+                progress REAL DEFAULT 0.0,
+                checkpoint_data TEXT,
+                last_checkpoint TEXT,
+                estimated_time_remaining REAL,
+                subtasks TEXT,
+                autonomous_mode INTEGER DEFAULT 0,
+                interruption_count INTEGER DEFAULT 0,
+                resumption_strategy TEXT DEFAULT 'continue'
             )
         """)
+        
+        # Create table for task history
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS task_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                action TEXT NOT NULL,
+                previous_status TEXT,
+                new_status TEXT,
+                metadata TEXT,
+                FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+            )
+        """)
+        
+        # Create table for task dependencies
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS task_dependencies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                depends_on_task_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                FOREIGN KEY(depends_on_task_id) REFERENCES tasks(task_id)
+            )
+        """)
+        
         self.db_conn.commit()
 
     def create_task(self, title: str, description: str, priority: int = 5, 
-                   dependencies: List[str] = None, tags: List[str] = None) -> Task:
-        """Create a new task"""
+                   dependencies: List[str] = None, tags: List[str] = None,
+                   autonomous_mode: bool = False) -> Task:
+        """Create a new task with enhanced capabilities"""
         task = Task(
             title=title,
             description=description,
             priority=priority,
             dependencies=dependencies or [],
-            tags=tags or []
+            tags=tags or [],
+            autonomous_mode=autonomous_mode
         )
         self.tasks[task.task_id] = task
         
@@ -3641,16 +3774,86 @@ class TaskManager:
         if self.db_conn:
             self._save_task_to_db(task)
             
+        # Add task to dependency graph
+        self._update_task_graph(task)
+        
+        # Record task creation in history
+        self._record_task_history(task, "create", None, "pending")
+            
         return task
+        
+    def _update_task_graph(self, task: Task):
+        """Update the task dependency graph"""
+        # Add the task node if it doesn't exist
+        if task.task_id not in self.task_graph:
+            self.task_graph.add_node(task.task_id, task=task)
+        
+        # Update node data
+        self.task_graph.nodes[task.task_id]['task'] = task
+        
+        # Add dependency edges
+        for dep_id in task.dependencies:
+            if dep_id in self.tasks:
+                self.task_graph.add_edge(dep_id, task.task_id)
+                
+                # Also save to database if available
+                if self.db_conn:
+                    cur = self.db_conn.cursor()
+                    cur.execute("""
+                        INSERT OR IGNORE INTO task_dependencies
+                        (task_id, depends_on_task_id, created_at)
+                        VALUES (?, ?, ?)
+                    """, (
+                        task.task_id,
+                        dep_id,
+                        datetime.now().isoformat()
+                    ))
+                    self.db_conn.commit()
+        
+    def _record_task_history(self, task: Task, action: str, 
+                           previous_status: Optional[str], new_status: str):
+        """Record task history for auditing and analysis"""
+        history_entry = {
+            "task_id": task.task_id,
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "previous_status": previous_status,
+            "new_status": new_status,
+            "metadata": {
+                "progress": task.progress,
+                "priority": task.priority
+            }
+        }
+        
+        self.task_history.append(history_entry)
+        
+        # Save to database if available
+        if self.db_conn:
+            cur = self.db_conn.cursor()
+            cur.execute("""
+                INSERT INTO task_history
+                (task_id, timestamp, action, previous_status, new_status, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                task.task_id,
+                history_entry["timestamp"],
+                action,
+                previous_status,
+                new_status,
+                json.dumps(history_entry["metadata"])
+            ))
+            self.db_conn.commit()
 
     def _save_task_to_db(self, task: Task):
-        """Save task to database"""
+        """Save task to database with enhanced fields"""
         cur = self.db_conn.cursor()
         cur.execute("""
             INSERT OR REPLACE INTO tasks 
             (task_id, title, description, status, priority, created_at, 
-             updated_at, completed_at, dependencies, tags, result, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             updated_at, completed_at, dependencies, tags, result, metadata,
+             progress, checkpoint_data, last_checkpoint, estimated_time_remaining,
+             subtasks, autonomous_mode, interruption_count, resumption_strategy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.task_id,
             task.title,
@@ -3663,9 +3866,23 @@ class TaskManager:
             json.dumps(task.dependencies),
             json.dumps(task.tags),
             json.dumps(task.result) if task.result is not None else None,
-            json.dumps(task.metadata)
+            json.dumps(task.metadata),
+            task.progress,
+            json.dumps(task.checkpoint_data),
+            task.last_checkpoint,
+            task.estimated_time_remaining,
+            json.dumps(task.subtasks),
+            1 if task.autonomous_mode else 0,
+            task.interruption_count,
+            task.resumption_strategy
         ))
         self.db_conn.commit()
+        
+        # Update task dependency graph
+        self._update_task_graph(task)
+        
+        # Record task history
+        self._record_task_history(task, "save", None, task.status)
 
     def get_task(self, task_id: str) -> Optional[Task]:
         """Get a task by ID"""
@@ -3691,16 +3908,24 @@ class TaskManager:
         return task
 
     def update_task_status(self, task_id: str, status: str) -> Optional[Task]:
-        """Update task status"""
+        """Update task status with history tracking"""
         task = self.get_task(task_id)
         if not task:
             return None
-            
+        
+        previous_status = task.status
         task.update_status(status)
         
         # Save to database if available
         if self.db_conn:
             self._save_task_to_db(task)
+            
+        # Record status change in history
+        self._record_task_history(task, "status_update", previous_status, status)
+        
+        # If this was the current autonomous task and it's completed/failed, clear it
+        if self.current_autonomous_task_id == task_id and status in ["completed", "failed"]:
+            self.current_autonomous_task_id = None
             
         return task
 
@@ -3735,27 +3960,64 @@ class TaskManager:
         # Sort by priority (lower first)
         return sorted(tasks, key=lambda t: t.priority)
 
-    def get_next_task(self) -> Optional[Task]:
-        """Get the highest priority pending task with no unmet dependencies"""
-        pending_tasks = self.list_tasks(status="pending")
+    def get_next_task(self, for_autonomous: bool = False) -> Optional[Task]:
+        """
+        Get the highest priority pending task with no unmet dependencies.
         
-        # Filter out tasks with unmet dependencies
+        Args:
+            for_autonomous: If True, only consider tasks marked for autonomous execution
+            
+        Returns:
+            The next task to work on, or None if no tasks are ready
+        """
+        # If we already have a current autonomous task, return it
+        if for_autonomous and self.current_autonomous_task_id:
+            current_task = self.get_task(self.current_autonomous_task_id)
+            if current_task and current_task.status in ["pending", "in_progress", "paused"]:
+                return current_task
+        
+        # Get all pending or paused tasks
+        candidate_tasks = []
+        for task in self.tasks.values():
+            if task.status in ["pending", "paused"]:
+                if for_autonomous and not task.autonomous_mode:
+                    continue  # Skip non-autonomous tasks when in autonomous mode
+                candidate_tasks.append(task)
+        
+        # Filter out tasks with unmet dependencies using the dependency graph
         ready_tasks = []
-        for task in pending_tasks:
+        for task in candidate_tasks:
             dependencies_met = True
+            
+            # Check if all dependencies are completed
             for dep_id in task.dependencies:
                 dep_task = self.get_task(dep_id)
                 if not dep_task or dep_task.status != "completed":
                     dependencies_met = False
                     break
+                    
             if dependencies_met:
                 ready_tasks.append(task)
                 
         if not ready_tasks:
             return None
             
-        # Return highest priority task
-        return min(ready_tasks, key=lambda t: t.priority)
+        # Sort by priority and then by whether it was previously paused
+        # Paused tasks get priority over pending tasks of the same priority
+        sorted_tasks = sorted(ready_tasks, key=lambda t: (
+            t.priority,  # Lower priority number first
+            0 if t.status == "paused" else 1,  # Paused tasks first
+            -t.progress if t.progress > 0 else 0,  # Higher progress first
+            t.created_at  # Older tasks first
+        ))
+        
+        next_task = sorted_tasks[0] if sorted_tasks else None
+        
+        # If this is for autonomous execution, set it as the current task
+        if for_autonomous and next_task:
+            self.current_autonomous_task_id = next_task.task_id
+            
+        return next_task
 
     def delete_task(self, task_id: str) -> bool:
         """Delete a task"""
@@ -3771,8 +4033,8 @@ class TaskManager:
             return True
         return False
 
-    def load_tasks_from_db(self):
-        """Load tasks from database"""
+    def _load_tasks_from_db(self):
+        """Load tasks from database with enhanced fields"""
         if not self.db_conn:
             return
             
@@ -3793,9 +4055,600 @@ class TaskManager:
                 dependencies=json.loads(row[8]) if row[8] else [],
                 tags=json.loads(row[9]) if row[9] else [],
                 result=json.loads(row[10]) if row[10] else None,
-                metadata=json.loads(row[11]) if row[11] else {}
+                metadata=json.loads(row[11]) if row[11] else {},
+                progress=row[12] if len(row) > 12 else 0.0,
+                checkpoint_data=json.loads(row[13]) if len(row) > 13 and row[13] else {},
+                last_checkpoint=row[14] if len(row) > 14 else None,
+                estimated_time_remaining=row[15] if len(row) > 15 else None,
+                subtasks=json.loads(row[16]) if len(row) > 16 and row[16] else [],
+                autonomous_mode=bool(row[17]) if len(row) > 17 else False,
+                interruption_count=row[18] if len(row) > 18 else 0,
+                resumption_strategy=row[19] if len(row) > 19 else "continue"
             )
             self.tasks[task.task_id] = task
+            
+        # Load task dependencies into the graph
+        cur.execute("SELECT task_id, depends_on_task_id FROM task_dependencies")
+        for row in cur.fetchall():
+            task_id, depends_on_id = row
+            if task_id in self.tasks and depends_on_id in self.tasks:
+                self.task_graph.add_edge(depends_on_id, task_id)
+                
+        # Load task history
+        cur.execute("SELECT task_id, timestamp, action, previous_status, new_status, metadata FROM task_history ORDER BY timestamp")
+        for row in cur.fetchall():
+            task_id, timestamp, action, prev_status, new_status, metadata_json = row
+            self.task_history.append({
+                "task_id": task_id,
+                "timestamp": timestamp,
+                "action": action,
+                "previous_status": prev_status,
+                "new_status": new_status,
+                "metadata": json.loads(metadata_json) if metadata_json else {}
+            })
+            
+    def enable_autonomous_mode(self, enabled: bool = True):
+        """Enable or disable autonomous task execution mode"""
+        self.autonomous_mode_enabled = enabled
+        return self.autonomous_mode_enabled
+        
+    def pause_current_autonomous_task(self):
+        """Pause the current autonomous task"""
+        if not self.current_autonomous_task_id:
+            return False
+            
+        task = self.get_task(self.current_autonomous_task_id)
+        if task and task.status == "in_progress":
+            return self.update_task_status(task.task_id, "paused")
+        return False
+        
+    def resume_task(self, task_id: str) -> Optional[Task]:
+        """Resume a paused task"""
+        task = self.get_task(task_id)
+        if not task or task.status != "paused":
+            return None
+            
+        # Resume from checkpoint
+        if task.resume_from_checkpoint():
+            self.update_task_status(task_id, "in_progress")
+            return task
+        return None
+        
+    def update_task_progress(self, task_id: str, progress: float, 
+                           checkpoint_data: Dict[str, Any] = None) -> Optional[Task]:
+        """Update task progress and checkpoint data"""
+        task = self.get_task(task_id)
+        if not task:
+            return None
+            
+        task.update_progress(progress, save_checkpoint=False)
+        
+        # Update checkpoint data if provided
+        if checkpoint_data:
+            task.checkpoint_data.update(checkpoint_data)
+            task.create_checkpoint()
+            
+        # Save to database
+        if self.db_conn:
+            self._save_task_to_db(task)
+            
+        # Record progress update in history
+        self._record_task_history(task, "progress_update", None, task.status)
+        
+        return task
+        
+    def get_task_dependencies(self, task_id: str) -> Dict[str, Any]:
+        """Get detailed information about a task's dependencies"""
+        task = self.get_task(task_id)
+        if not task:
+            return {"error": "Task not found"}
+            
+        result = {
+            "task_id": task_id,
+            "direct_dependencies": [],
+            "all_dependencies": [],
+            "blocking_dependencies": [],
+            "dependency_graph": {}
+        }
+        
+        # Get direct dependencies
+        for dep_id in task.dependencies:
+            dep_task = self.get_task(dep_id)
+            if dep_task:
+                dep_info = {
+                    "task_id": dep_id,
+                    "title": dep_task.title,
+                    "status": dep_task.status,
+                    "progress": dep_task.progress
+                }
+                result["direct_dependencies"].append(dep_info)
+                
+                # Check if this dependency is blocking
+                if dep_task.status != "completed":
+                    result["blocking_dependencies"].append(dep_info)
+        
+        # Get all dependencies using the graph
+        if task_id in self.task_graph:
+            # Get all ancestors (dependencies)
+            ancestors = list(nx.ancestors(self.task_graph, task_id))
+            for anc_id in ancestors:
+                anc_task = self.get_task(anc_id)
+                if anc_task:
+                    result["all_dependencies"].append({
+                        "task_id": anc_id,
+                        "title": anc_task.title,
+                        "status": anc_task.status,
+                        "progress": anc_task.progress
+                    })
+            
+            # Create a subgraph of dependencies for visualization
+            subgraph = self.task_graph.subgraph(ancestors + [task_id])
+            result["dependency_graph"] = nx.node_link_data(subgraph)
+            
+        return result
+        
+    def get_autonomous_task_status(self) -> Dict[str, Any]:
+        """Get the status of autonomous task execution"""
+        result = {
+            "autonomous_mode_enabled": self.autonomous_mode_enabled,
+            "current_task": None,
+            "pending_autonomous_tasks": 0,
+            "completed_autonomous_tasks": 0,
+            "paused_autonomous_tasks": 0
+        }
+        
+        # Count autonomous tasks by status
+        for task in self.tasks.values():
+            if task.autonomous_mode:
+                if task.status == "pending":
+                    result["pending_autonomous_tasks"] += 1
+                elif task.status == "completed":
+                    result["completed_autonomous_tasks"] += 1
+                elif task.status == "paused":
+                    result["paused_autonomous_tasks"] += 1
+        
+        # Get current autonomous task details
+        if self.current_autonomous_task_id:
+            task = self.get_task(self.current_autonomous_task_id)
+            if task:
+                result["current_task"] = {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "progress": task.progress,
+                    "last_checkpoint": task.last_checkpoint,
+                    "interruption_count": task.interruption_count
+                }
+                
+        return result
+        
+    def decompose_task(self, task_id: str, subtasks: List[Dict[str, str]]) -> bool:
+        """Break down a task into subtasks"""
+        task = self.get_task(task_id)
+        if not task:
+            return False
+            
+        # Add subtasks
+        for subtask_info in subtasks:
+            title = subtask_info.get("title", "Untitled Subtask")
+            description = subtask_info.get("description", "")
+            priority = int(subtask_info.get("priority", 5))
+            
+            task.add_subtask(title, description, priority)
+            
+        # Save to database
+        if self.db_conn:
+            self._save_task_to_db(task)
+            
+        # Record decomposition in history
+        self._record_task_history(
+            task, 
+            "decompose", 
+            task.status, 
+            task.status
+        )
+        
+        return True
+
+class AutonomousTaskExecutor:
+    """
+    Handles autonomous execution of tasks with persistence and interruption handling.
+    This class manages the continuous execution of tasks in the background,
+    with the ability to pause, resume, and checkpoint progress.
+    """
+    def __init__(self, agent):
+        self.agent = agent
+        self.running = False
+        self.executor_task = None
+        self.current_task_id = None
+        self.execution_interval = 5.0  # Seconds between execution cycles
+        self.max_execution_time = 60.0  # Maximum time to spend on a task before checkpointing
+        self.execution_stats = {
+            "tasks_completed": 0,
+            "tasks_started": 0,
+            "tasks_paused": 0,
+            "total_execution_time": 0.0,
+            "interruptions": 0
+        }
+        self.last_status_check = time.time()
+        self.status_check_interval = 30.0  # Check system status every 30 seconds
+        
+    async def start(self):
+        """Start the autonomous task executor"""
+        if self.running:
+            return False
+            
+        self.running = True
+        self.executor_task = asyncio.create_task(self._executor_loop())
+        logging.info("Autonomous task executor started")
+        return True
+        
+    async def stop(self):
+        """Stop the autonomous task executor"""
+        if not self.running:
+            return False
+            
+        self.running = False
+        
+        # Pause the current task if there is one
+        if self.current_task_id:
+            await self._pause_current_task()
+            
+        # Wait for the executor to stop
+        if self.executor_task:
+            try:
+                await asyncio.wait_for(self.executor_task, timeout=10.0)
+            except asyncio.TimeoutError:
+                self.executor_task.cancel()
+                try:
+                    await self.executor_task
+                except asyncio.CancelledError:
+                    pass
+                    
+        logging.info("Autonomous task executor stopped")
+        return True
+        
+    async def _executor_loop(self):
+        """Main loop for autonomous task execution"""
+        try:
+            while self.running:
+                # Check if task manager is in autonomous mode
+                if not self.agent.task_manager.autonomous_mode_enabled:
+                    await asyncio.sleep(self.execution_interval)
+                    continue
+                    
+                # Check system status periodically
+                current_time = time.time()
+                if current_time - self.last_status_check >= self.status_check_interval:
+                    self.last_status_check = current_time
+                    if not await self._check_system_status():
+                        # System is not in a good state, pause execution
+                        logging.warning("System status check failed, pausing autonomous execution")
+                        await asyncio.sleep(self.status_check_interval)
+                        continue
+                
+                # Get the next task to work on
+                task = self.agent.task_manager.get_next_task(for_autonomous=True)
+                
+                if not task:
+                    # No tasks available, wait and try again
+                    await asyncio.sleep(self.execution_interval)
+                    continue
+                    
+                # Set as current task
+                self.current_task_id = task.task_id
+                
+                # If task was paused, resume it
+                if task.status == "paused":
+                    logging.info(f"Resuming paused task: {task.title} ({task.task_id})")
+                    self.agent.task_manager.resume_task(task.task_id)
+                else:
+                    # Start a new task
+                    logging.info(f"Starting autonomous task: {task.title} ({task.task_id})")
+                    self.agent.task_manager.update_task_status(task.task_id, "in_progress")
+                    self.execution_stats["tasks_started"] += 1
+                
+                # Execute the task with time limit
+                start_time = time.time()
+                try:
+                    success = await asyncio.wait_for(
+                        self._execute_task(task),
+                        timeout=self.max_execution_time
+                    )
+                    
+                    if success:
+                        # Task completed successfully
+                        self.agent.task_manager.update_task_status(task.task_id, "completed")
+                        self.execution_stats["tasks_completed"] += 1
+                        logging.info(f"Completed task: {task.title} ({task.task_id})")
+                    else:
+                        # Task failed
+                        self.agent.task_manager.update_task_status(task.task_id, "failed")
+                        logging.warning(f"Failed task: {task.title} ({task.task_id})")
+                        
+                except asyncio.TimeoutError:
+                    # Task took too long, checkpoint and pause
+                    logging.info(f"Task execution time limit reached, checkpointing: {task.title}")
+                    await self._pause_current_task()
+                    self.execution_stats["tasks_paused"] += 1
+                    
+                except asyncio.CancelledError:
+                    # Execution was cancelled, checkpoint and pause
+                    logging.info(f"Task execution cancelled, checkpointing: {task.title}")
+                    await self._pause_current_task()
+                    self.execution_stats["interruptions"] += 1
+                    raise
+                    
+                except Exception as e:
+                    # Unexpected error
+                    logging.error(f"Error executing task {task.task_id}: {e}")
+                    self.agent.task_manager.update_task_status(task.task_id, "failed")
+                    
+                finally:
+                    # Update execution stats
+                    execution_time = time.time() - start_time
+                    self.execution_stats["total_execution_time"] += execution_time
+                    self.current_task_id = None
+                    
+                # Small delay between tasks
+                await asyncio.sleep(1.0)
+                
+        except asyncio.CancelledError:
+            logging.info("Autonomous task executor cancelled")
+            raise
+        except Exception as e:
+            logging.error(f"Error in autonomous task executor: {e}")
+            
+    async def _execute_task(self, task: Task) -> bool:
+        """
+        Execute a single task autonomously
+        
+        Args:
+            task: The task to execute
+            
+        Returns:
+            bool: True if the task was completed successfully, False otherwise
+        """
+        try:
+            # Check if task has subtasks
+            if task.subtasks:
+                # Execute subtasks in order
+                return await self._execute_subtasks(task)
+                
+            # No subtasks, execute the task directly
+            # This would typically involve generating a plan and executing it
+            # For now, we'll simulate task execution with progress updates
+            
+            # Create a conversation for this task if needed
+            conv_id = task.metadata.get("conversation_id")
+            if not conv_id:
+                conv_id = await self.agent.create_conversation(f"Task: {task.title}")
+                task.metadata["conversation_id"] = conv_id
+                self.agent.task_manager._save_task_to_db(task)
+            
+            # Generate a plan if not already in checkpoint data
+            if "plan" not in task.checkpoint_data:
+                plan_prompt = f"""
+                I need to complete the following task autonomously:
+                
+                Task: {task.title}
+                Description: {task.description}
+                
+                Please create a detailed step-by-step plan to complete this task.
+                For each step, include:
+                1. A clear description of what needs to be done
+                2. Any tools or resources needed
+                3. How to verify the step was completed successfully
+                4. Estimated time to complete
+                
+                Format the plan as a JSON array of steps.
+                """
+                
+                # Use DEEP_TASK mode for better planning
+                original_mode = self.agent.response_mode
+                await self.agent.set_response_mode(ResponseMode.DEEP_TASK)
+                
+                plan_response = await self.agent.qa(conv_id, plan_prompt)
+                
+                # Restore original mode
+                self.agent.response_mode = original_mode
+                
+                # Extract JSON plan from response
+                import re
+                json_matches = re.findall(r'```(?:json)?\s*([\s\S]*?)```', plan_response)
+                
+                if json_matches:
+                    try:
+                        plan = json.loads(json_matches[0])
+                        task.checkpoint_data["plan"] = plan
+                        task.checkpoint_data["current_step"] = 0
+                        self.agent.task_manager._save_task_to_db(task)
+                    except json.JSONDecodeError:
+                        # Fallback: create a simple plan
+                        task.checkpoint_data["plan"] = [
+                            {"description": "Complete the task", "estimated_time": 60}
+                        ]
+                        task.checkpoint_data["current_step"] = 0
+                else:
+                    # Fallback: create a simple plan
+                    task.checkpoint_data["plan"] = [
+                        {"description": "Complete the task", "estimated_time": 60}
+                    ]
+                    task.checkpoint_data["current_step"] = 0
+            
+            # Execute the plan steps
+            plan = task.checkpoint_data["plan"]
+            current_step = task.checkpoint_data["current_step"]
+            
+            while current_step < len(plan):
+                step = plan[current_step]
+                
+                # Execute the current step
+                step_prompt = f"""
+                I'm working on the task: {task.title}
+                
+                Current step ({current_step + 1}/{len(plan)}): {step['description']}
+                
+                Please execute this step and provide the results. If tools are needed,
+                use them appropriately. When the step is complete, indicate success
+                and provide any relevant output.
+                """
+                
+                step_response = await self.agent.qa(conv_id, step_prompt)
+                
+                # Update step with results
+                step["result"] = step_response
+                step["completed"] = True
+                step["completed_at"] = datetime.now().isoformat()
+                
+                # Move to next step
+                current_step += 1
+                task.checkpoint_data["current_step"] = current_step
+                
+                # Update progress based on steps completed
+                progress = current_step / len(plan)
+                self.agent.task_manager.update_task_progress(
+                    task.task_id, 
+                    progress, 
+                    task.checkpoint_data
+                )
+                
+                # Check if we should yield to allow for interruption
+                if not self.running:
+                    return False
+            
+            # All steps completed
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error executing task {task.task_id}: {e}")
+            return False
+            
+    async def _execute_subtasks(self, task: Task) -> bool:
+        """Execute a task's subtasks"""
+        # Get pending or in-progress subtasks
+        pending_subtasks = [
+            s for s in task.subtasks 
+            if s.get("status") in ["pending", "in_progress"]
+        ]
+        
+        if not pending_subtasks:
+            # All subtasks are completed
+            return True
+            
+        # Sort subtasks by priority
+        pending_subtasks.sort(key=lambda s: s.get("priority", 5))
+        
+        # Execute each subtask
+        for subtask in pending_subtasks:
+            subtask_id = subtask["id"]
+            
+            # Skip completed subtasks
+            if subtask.get("status") == "completed":
+                continue
+                
+            # Mark subtask as in progress
+            task.update_subtask(subtask_id, "in_progress")
+            self.agent.task_manager._save_task_to_db(task)
+            
+            # Create a conversation for this subtask if needed
+            conv_id = subtask.get("conversation_id")
+            if not conv_id:
+                conv_id = await self.agent.create_conversation(f"Subtask: {subtask['title']}")
+                subtask["conversation_id"] = conv_id
+                task.update_subtask(subtask_id, "in_progress")
+                self.agent.task_manager._save_task_to_db(task)
+            
+            # Execute the subtask
+            subtask_prompt = f"""
+            I need to complete the following subtask:
+            
+            Subtask: {subtask['title']}
+            Description: {subtask['description']}
+            
+            This is part of the larger task: {task.title}
+            
+            Please execute this subtask and provide the results. If tools are needed,
+            use them appropriately. When the subtask is complete, indicate success
+            and provide any relevant output.
+            """
+            
+            try:
+                subtask_response = await self.agent.qa(conv_id, subtask_prompt)
+                
+                # Update subtask with results
+                subtask["result"] = subtask_response
+                subtask["completed_at"] = datetime.now().isoformat()
+                task.update_subtask(subtask_id, "completed", 1.0)
+                
+                # Update overall task progress
+                self.agent.task_manager._save_task_to_db(task)
+                
+            except Exception as e:
+                logging.error(f"Error executing subtask {subtask_id}: {e}")
+                task.update_subtask(subtask_id, "failed")
+                self.agent.task_manager._save_task_to_db(task)
+                
+            # Check if we should yield to allow for interruption
+            if not self.running:
+                return False
+                
+        # Check if all subtasks are completed
+        all_completed = all(
+            s.get("status") == "completed" 
+            for s in task.subtasks
+        )
+        
+        return all_completed
+            
+    async def _pause_current_task(self):
+        """Pause the current task with proper checkpointing"""
+        if not self.current_task_id:
+            return
+            
+        task = self.agent.task_manager.get_task(self.current_task_id)
+        if task and task.status == "in_progress":
+            # Create checkpoint and pause
+            self.agent.task_manager.update_task_status(task.task_id, "paused")
+            logging.info(f"Paused task: {task.title} ({task.task_id})")
+            
+    async def _check_system_status(self) -> bool:
+        """
+        Check if the system is in a good state to continue autonomous execution
+        
+        Returns:
+            bool: True if the system is in a good state, False otherwise
+        """
+        try:
+            # Check system resources
+            import psutil
+            
+            # Check CPU usage
+            cpu_usage = psutil.cpu_percent(interval=0.5)
+            if cpu_usage > 90:  # CPU usage above 90%
+                logging.warning(f"High CPU usage: {cpu_usage}%, pausing autonomous execution")
+                return False
+                
+            # Check memory usage
+            memory = psutil.virtual_memory()
+            if memory.percent > 90:  # Memory usage above 90%
+                logging.warning(f"High memory usage: {memory.percent}%, pausing autonomous execution")
+                return False
+                
+            # Check disk space
+            disk = psutil.disk_usage('/')
+            if disk.percent > 95:  # Disk usage above 95%
+                logging.warning(f"Low disk space: {disk.percent}% used, pausing autonomous execution")
+                return False
+                
+            return True
+            
+        except ImportError:
+            # psutil not available, assume system is OK
+            return True
+        except Exception as e:
+            logging.error(f"Error checking system status: {e}")
+            return True  # Assume OK on error to avoid unnecessary pausing
 
 class ResponseMode(Enum):
     """Response modes for the agent"""
@@ -3810,6 +4663,7 @@ class Agent(BaseModel):
     """
     Advanced agent that can ingest data, reflect on its own code,
     and modify itself based on internal reflection and reinforcement learning.
+    Enhanced with autonomous task execution capabilities.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -3826,7 +4680,18 @@ class Agent(BaseModel):
     response_mode: ResponseMode = Field(default=ResponseMode.NORMAL)
     sub_agents: Dict[str, Any] = Field(default_factory=dict)  # For DEEP_FLOW mode
     active_flows: List[Dict[str, Any]] = Field(default_factory=list)  # For DEEP_FLOW mode
-
+    autonomous_executor: Optional[Any] = None  # Autonomous task executor
+    
+    # Persistence settings
+    persistence_enabled: bool = True
+    persistence_interval: int = 60  # Seconds between state persistence
+    last_persistence_time: float = Field(default_factory=time.time)
+    
+    # Work continuity settings
+    work_continuity_enabled: bool = False
+    max_continuous_work_time: int = 3600  # 1 hour
+    work_session_start_time: Optional[float] = None
+    
     root: Optional[Node] = None
     q_table: Dict[str, float] = Field(default_factory=dict)
     exploration_rate: float = 0.1
@@ -3910,6 +4775,14 @@ class Agent(BaseModel):
         # Initialize job scheduler for long-running tasks
         self.job_scheduler = JobScheduler(max_concurrent_jobs=10)
         # We'll start the job scheduler when needed, not in __init__
+        
+        # Initialize autonomous task executor
+        self.autonomous_executor = AutonomousTaskExecutor(self)
+        
+        # Register persistence timer
+        self._persistence_timer_task = None
+        if self.persistence_enabled:
+            self._start_persistence_timer()
         
         # Register code reading and writing tools
         register_tool(
@@ -4041,6 +4914,85 @@ class Agent(BaseModel):
                     "type": "number",
                     "description": "Optional timeout in seconds",
                     "default": None
+                }
+            }
+        )
+        
+        # Register autonomous task management tools
+        register_tool(
+            name="start_autonomous_execution",
+            func=self.start_autonomous_execution,
+            description="Start autonomous task execution",
+            parameters={}
+        )
+        
+        register_tool(
+            name="stop_autonomous_execution",
+            func=self.stop_autonomous_execution,
+            description="Stop autonomous task execution",
+            parameters={}
+        )
+        
+        register_tool(
+            name="get_autonomous_execution_status",
+            func=self.get_autonomous_execution_status,
+            description="Get the status of autonomous task execution",
+            parameters={}
+        )
+        
+        register_tool(
+            name="create_autonomous_task",
+            func=self.create_autonomous_task,
+            description="Create a task that can be executed autonomously",
+            parameters={
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the task"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of the task"
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority level (1-10, lower is higher priority)",
+                    "default": 5
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of task IDs this task depends on",
+                    "default": []
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of tags for categorizing the task",
+                    "default": []
+                }
+            }
+        )
+        
+        register_tool(
+            name="decompose_task",
+            func=self.decompose_task,
+            description="Break down a task into subtasks for autonomous execution",
+            parameters={
+                "task_id": {
+                    "type": "string",
+                    "description": "ID of the task to decompose"
+                },
+                "subtasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "priority": {"type": "integer"}
+                        }
+                    },
+                    "description": "List of subtasks to create"
                 }
             }
         )
@@ -4929,6 +5881,155 @@ class Agent(BaseModel):
         """Ensure the job scheduler is running"""
         if not self.job_scheduler.running:
             await self.job_scheduler.start()
+            
+    async def start_autonomous_execution(self) -> bool:
+        """Start autonomous task execution"""
+        # Enable autonomous mode in task manager
+        self.task_manager.enable_autonomous_mode(True)
+        
+        # Start the autonomous executor
+        result = await self.autonomous_executor.start()
+        
+        if result:
+            self.work_continuity_enabled = True
+            self.work_session_start_time = time.time()
+            logging.info("Autonomous task execution started")
+            
+        return result
+        
+    async def stop_autonomous_execution(self) -> bool:
+        """Stop autonomous task execution"""
+        # Disable autonomous mode in task manager
+        self.task_manager.enable_autonomous_mode(False)
+        
+        # Stop the autonomous executor
+        result = await self.autonomous_executor.stop()
+        
+        if result:
+            self.work_continuity_enabled = False
+            self.work_session_start_time = None
+            logging.info("Autonomous task execution stopped")
+            
+        return result
+        
+    async def get_autonomous_execution_status(self) -> Dict[str, Any]:
+        """Get the status of autonomous task execution"""
+        # Get status from task manager
+        task_status = self.task_manager.get_autonomous_task_status()
+        
+        # Get executor stats
+        executor_stats = self.autonomous_executor.execution_stats.copy()
+        
+        # Calculate work session duration if active
+        work_session_duration = None
+        if self.work_session_start_time:
+            work_session_duration = time.time() - self.work_session_start_time
+            
+        return {
+            "enabled": self.work_continuity_enabled,
+            "current_task": task_status.get("current_task"),
+            "work_session_duration": work_session_duration,
+            "max_continuous_work_time": self.max_continuous_work_time,
+            "executor_stats": executor_stats,
+            "task_stats": {
+                "pending": task_status.get("pending_autonomous_tasks", 0),
+                "completed": task_status.get("completed_autonomous_tasks", 0),
+                "paused": task_status.get("paused_autonomous_tasks", 0)
+            }
+        }
+        
+    async def create_autonomous_task(self, title: str, description: str, priority: int = 5,
+                                  dependencies: List[str] = None, tags: List[str] = None) -> Dict[str, Any]:
+        """Create a task that can be executed autonomously"""
+        try:
+            task = self.task_manager.create_task(
+                title=title,
+                description=description,
+                priority=priority,
+                dependencies=dependencies or [],
+                tags=tags or [],
+                autonomous_mode=True
+            )
+            
+            return {
+                "success": True,
+                "task_id": task.task_id,
+                "title": task.title,
+                "status": task.status,
+                "priority": task.priority,
+                "created_at": task.created_at,
+                "autonomous_mode": task.autonomous_mode
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+            
+    async def decompose_task(self, task_id: str, subtasks: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Break down a task into subtasks for autonomous execution"""
+        try:
+            success = self.task_manager.decompose_task(task_id, subtasks)
+            
+            if success:
+                task = self.task_manager.get_task(task_id)
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "subtasks_count": len(task.subtasks),
+                    "message": f"Task successfully decomposed into {len(task.subtasks)} subtasks"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to decompose task"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+            
+    def _start_persistence_timer(self):
+        """Start a timer for periodic state persistence"""
+        async def persistence_timer():
+            while self.persistence_enabled:
+                current_time = time.time()
+                if current_time - self.last_persistence_time >= self.persistence_interval:
+                    await self._persist_state()
+                    self.last_persistence_time = current_time
+                await asyncio.sleep(min(10, self.persistence_interval / 2))
+                
+        self._persistence_timer_task = asyncio.create_task(persistence_timer())
+        
+    async def _persist_state(self):
+        """Persist the agent's state to enable work continuity"""
+        try:
+            # Save any in-memory state to database
+            # This is already handled by the task manager for tasks
+            
+            # Persist any additional state needed for work continuity
+            if self.work_continuity_enabled and self.work_session_start_time:
+                # Check if we've exceeded the maximum continuous work time
+                if time.time() - self.work_session_start_time > self.max_continuous_work_time:
+                    logging.info("Maximum continuous work time reached, pausing autonomous execution")
+                    await self.stop_autonomous_execution()
+                    
+                    # Create a task to resume autonomous execution later
+                    self.task_manager.create_task(
+                        title="Resume autonomous execution",
+                        description="Resume autonomous execution after the maximum continuous work time was reached",
+                        priority=1,
+                        tags=["system", "autonomous"],
+                        autonomous_mode=True
+                    )
+            
+            logging.debug("Agent state persisted")
+            
+        except Exception as e:
+            logging.error(f"Error persisting agent state: {e}")
             
     async def set_response_mode(self, mode: Union[ResponseMode, str]) -> str:
         """Set the agent's response mode"""
@@ -7311,12 +8412,159 @@ class AgentCLI(cmd.Cmd):
                 print(f"Error testing transformation: {e}")
                 print(traceback.format_exc())
                 
+        def do_autonomous(self, arg):
+            """
+            Manage autonomous task execution: autonomous [start|stop|status|create|decompose]
+            
+            Commands:
+              start           - Start autonomous task execution
+              stop            - Stop autonomous task execution
+              status          - Show autonomous execution status
+              create          - Create a new autonomous task
+              decompose       - Break down a task into subtasks
+              
+            Examples:
+              autonomous start
+              autonomous stop
+              autonomous status
+              autonomous create "Research ML algorithms" "Research and summarize recent ML algorithms"
+              autonomous decompose task_id "Subtask 1" "Subtask 2" "Subtask 3"
+            """
+            args = shlex.split(arg)
+            if not args:
+                print("Usage: autonomous [start|stop|status|create|decompose]")
+                return
+                
+            command = args[0].lower()
+            
+            if command == "start":
+                print("Starting autonomous task execution...")
+                result = asyncio.run(self.agent.start_autonomous_execution())
+                if result:
+                    print("Autonomous task execution started successfully.")
+                else:
+                    print("Failed to start autonomous task execution.")
+                    
+            elif command == "stop":
+                print("Stopping autonomous task execution...")
+                result = asyncio.run(self.agent.stop_autonomous_execution())
+                if result:
+                    print("Autonomous task execution stopped successfully.")
+                else:
+                    print("Failed to stop autonomous task execution.")
+                    
+            elif command == "status":
+                status = asyncio.run(self.agent.get_autonomous_execution_status())
+                
+                print("\n=== Autonomous Execution Status ===")
+                print(f"Enabled: {status['enabled']}")
+                
+                if status['current_task']:
+                    task = status['current_task']
+                    print(f"\nCurrent Task: {task['title']}")
+                    print(f"  ID: {task['task_id']}")
+                    print(f"  Status: {task['status']}")
+                    print(f"  Progress: {task['progress']*100:.1f}%")
+                    if task['last_checkpoint']:
+                        print(f"  Last Checkpoint: {task['last_checkpoint']}")
+                    print(f"  Interruption Count: {task['interruption_count']}")
+                else:
+                    print("\nNo task currently being executed.")
+                    
+                if status['work_session_duration']:
+                    duration_mins = status['work_session_duration'] / 60
+                    print(f"\nWork Session Duration: {duration_mins:.1f} minutes")
+                    print(f"Maximum Work Time: {status['max_continuous_work_time']/60:.1f} minutes")
+                    
+                print("\nTask Statistics:")
+                print(f"  Pending: {status['task_stats']['pending']}")
+                print(f"  Completed: {status['task_stats']['completed']}")
+                print(f"  Paused: {status['task_stats']['paused']}")
+                
+                print("\nExecution Statistics:")
+                stats = status['executor_stats']
+                print(f"  Tasks Started: {stats['tasks_started']}")
+                print(f"  Tasks Completed: {stats['tasks_completed']}")
+                print(f"  Tasks Paused: {stats['tasks_paused']}")
+                print(f"  Interruptions: {stats['interruptions']}")
+                print(f"  Total Execution Time: {stats['total_execution_time']:.1f} seconds")
+                
+            elif command == "create":
+                if len(args) < 3:
+                    print("Usage: autonomous create <title> <description> [priority=5] [tags=tag1,tag2]")
+                    return
+                    
+                title = args[1]
+                description = args[2]
+                priority = 5
+                tags = []
+                
+                # Parse optional arguments
+                for i in range(3, len(args)):
+                    if args[i].startswith("priority="):
+                        try:
+                            priority = int(args[i].split("=")[1])
+                        except ValueError:
+                            print(f"Invalid priority: {args[i].split('=')[1]}")
+                            return
+                    elif args[i].startswith("tags="):
+                        tags = args[i].split("=")[1].split(",")
+                
+                # Create autonomous task
+                result = asyncio.run(self.agent.create_autonomous_task(
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    tags=tags
+                ))
+                
+                if result["success"]:
+                    print(f"Created autonomous task: {result['title']} (ID: {result['task_id']})")
+                else:
+                    print(f"Error creating autonomous task: {result['error']}")
+                    
+            elif command == "decompose":
+                if len(args) < 3:
+                    print("Usage: autonomous decompose <task_id> <subtask1> <subtask2> ...")
+                    return
+                    
+                task_id = args[1]
+                subtasks = []
+                
+                # Create subtasks from remaining arguments
+                for i in range(2, len(args)):
+                    subtasks.append({
+                        "title": args[i],
+                        "description": f"Subtask: {args[i]}"
+                    })
+                
+                if not subtasks:
+                    print("No subtasks specified.")
+                    return
+                    
+                # Decompose task
+                result = asyncio.run(self.agent.decompose_task(task_id, subtasks))
+                
+                if result["success"]:
+                    print(f"Task {task_id} decomposed into {result['subtasks_count']} subtasks.")
+                else:
+                    print(f"Error decomposing task: {result['error']}")
+                    
+            else:
+                print(f"Unknown command: {command}")
+                print("Usage: autonomous [start|stop|status|create|decompose]")
+                
         def do_check_restart(self, arg):
             """Check if a restart is needed and restart the agent if necessary"""
             restart_file = "agent_restart_signal.txt"
             if os.path.exists(restart_file):
                 print("Restart signal detected. Restarting agent...")
                 os.remove(restart_file)
+                
+                # Stop autonomous execution if running
+                if self.agent.work_continuity_enabled:
+                    print("Stopping autonomous execution...")
+                    asyncio.run(self.agent.stop_autonomous_execution())
                 
                 # Restart the agent
                 print("Stopping current agent...")
