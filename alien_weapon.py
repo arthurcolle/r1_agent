@@ -4306,8 +4306,8 @@ class CognitiveModelingEngine:
             metadata={"strategy": strategy, "option_index": i},
             confidence=confidence * 0.8,
             path=option_path_id
-                )
-                
+            )
+            
             metadata["created_paths"] = True
         
         return self.add_reasoning_step(
